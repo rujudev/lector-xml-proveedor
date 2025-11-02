@@ -1,0 +1,93 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// Note that some adapters may set a maximum length for the String type by default, please ensure your strings are long
+// enough when changing adapters.
+// See https://www.prisma.io/docs/orm/reference/prisma-schema-reference#string for more information
+datasource db {
+  provider = "sqlite"
+  url      = "file:dev.sqlite"
+}
+
+model Session {
+  id            String    @id
+  shop          String
+  state         String
+  isOnline      Boolean   @default(false)
+  scope         String?
+  expires       DateTime?
+  accessToken   String
+  userId        BigInt?
+  firstName     String?
+  lastName      String?
+  email         String?
+  accountOwner  Boolean   @default(false)
+  locale        String?
+  collaborator  Boolean?  @default(false)
+  emailVerified Boolean?  @default(false)
+}
+
+model XmlProvider {
+  id          String   @id @default(cuid())
+  shop        String   // Shopify store domain
+  name        String   // Nombre del proveedor
+  xmlUrl      String   // URL del XML
+  isActive    Boolean  @default(true)
+  syncFrequency Int    @default(8) // Horas entre sincronizaciones (3 veces al día = cada 8 horas)
+  autoDelete  Boolean  @default(true) // Si eliminar automáticamente productos que no están en XML
+  lastSync    DateTime?
+  nextSync    DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  products    ProductMapping[]
+  syncLogs    SyncLog[]
+}
+
+model ProductMapping {
+  id            String   @id @default(cuid())
+  providerId    String
+  provider      XmlProvider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  
+  // Identificadores del XML
+  xmlProductId  String   // ID del producto en el XML (sku, id, etc.)
+  xmlSku        String?  // SKU del producto en el XML
+  
+  // Identificadores de Shopify
+  shopifyProductId String // ID del producto en Shopify
+  shopifyHandle    String // Handle del producto en Shopify
+  
+  // Metadata
+  title         String
+  lastPrice     Float?
+  lastUpdated   DateTime @default(now())
+  lastSeenInXml DateTime @default(now()) // Última vez que se vio en el XML
+  isActive      Boolean  @default(true)   // Si está activo en Shopify
+  createdAt     DateTime @default(now())
+  
+  @@unique([providerId, xmlProductId])
+}
+
+model SyncLog {
+  id                String   @id @default(cuid())
+  providerId        String
+  provider          XmlProvider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  
+  status            String   // 'success', 'error', 'partial'
+  totalProducts     Int      @default(0)
+  productsCreated   Int      @default(0)
+  productsUpdated   Int      @default(0)
+  productsDeleted   Int      @default(0)  // Productos eliminados
+  productsErrors    Int      @default(0)
+  
+  errorMessage      String?
+  details           String?  // JSON con detalles del sync
+  
+  startedAt         DateTime @default(now())
+  completedAt       DateTime?
+  duration          Int?     // Duración en segundos
+}
