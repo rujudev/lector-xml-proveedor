@@ -565,9 +565,9 @@ const VARIANT_UPDATE = `
   }
 `;
 
-const VARIANTS_BULK_CREATE = `
-  mutation createVariantsBulk($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
-    productVariantsBulkCreate(productId: $productId, variants: $variants) {
+const VARIANTS_SET = `
+  mutation setVariants($productId: ID!, $variants: [ProductVariantSetInput!]!) {
+    productVariantsSet(productId: $productId, variants: $variants) {
       productVariants {
         id
         title
@@ -1054,17 +1054,21 @@ async function createShopifyProductWithVariants(admin, variants) {
       log(`⚠️ Error agregando imágenes: ${imagesResult.error}`);
     }
 
-    // Paso 3: Asignar SKU a la variante por defecto (primera variante)
-    if (createdProduct.variants?.edges?.length > 0) {
-      const defaultVariant = createdProduct.variants.edges[0].node;
-      await updateDefaultVariant(admin, defaultVariant.id, masterProduct, createdProduct.id);
-    }
-
-    // Paso 4: Si hay múltiples variantes, crear variantes adicionales
+    // Paso 3: Si hay múltiples variantes, establecer todas las variantes de una vez
     if (variants.length > 1) {
       const variantsResult = await createProductVariants(admin, createdProduct, variants);
       if (!variantsResult.success) {
-        log(`⚠️ Error creando variantes adicionales, pero producto base creado: ${variantsResult.error}`);
+        log(`⚠️ Error estableciendo variantes, pero producto base creado: ${variantsResult.error}`);
+      } else {
+        if (CONFIG.LOG) {
+          log(`✅ ${variants.length} variantes establecidas correctamente con SKUs`);
+        }
+      }
+    } else {
+      // Para productos únicos, solo actualizar la variante por defecto
+      if (createdProduct.variants?.edges?.length > 0) {
+        const defaultVariant = createdProduct.variants.edges[0].node;
+        await updateDefaultVariant(admin, defaultVariant.id, masterProduct, createdProduct.id);
       }
     }
 
@@ -1156,115 +1160,78 @@ async function createProductVariants(admin, product, variants) {
       log(`🎯 Creando ${variantsInput.length} variantes adicionales`);
     }
 
-    // --- Ejecutar Bulk Create ---
+    // --- Ejecutar Set de Variantes (incluye la variante por defecto + nuevas) ---
+    const allVariants = [];
+    const masterVariant = variants[0]; // Primer elemento como variante principal
+    
+    // Incluir variante por defecto con datos completos
+    const masterVariantInput = {
+      price: parseFloat(masterVariant.price).toFixed(2),
+      inventoryPolicy: masterVariant.inventoryPolicy || "CONTINUE",
+      sku: masterVariant.sku ? sanitize(masterVariant.sku.toString()) : undefined,
+      barcode: masterVariant.gtin && /^[0-9]{8,}$/.test(masterVariant.gtin.toString()) 
+        ? masterVariant.gtin.toString() 
+        : undefined,
+      optionValues: []
+    };
+    
+    // Generar opciones para la variante principal
+    const sizeMatch = masterVariant.title?.match(/(\d+(?:GB|TB|ML|L))/i);
+    const capacityValue = sizeMatch ? sizeMatch[1] : "Estándar";
+    masterVariantInput.optionValues.push({ optionName: "Capacidad", name: capacityValue });
+    
+    const CONDITIONS = { "new": "Nuevo", "refurbished": "Reacondicionado", "used": "Usado" };
+    const conditionValue = CONDITIONS[masterVariant.condition] || "Nuevo";
+    masterVariantInput.optionValues.push({ optionName: "Condición", name: conditionValue });
+    
+    if (masterVariant.color) {
+      masterVariantInput.optionValues.push({ optionName: "Color", name: masterVariant.color });
+    }
+    
+    if (masterVariant.image_link) {
+      masterVariantInput.mediaSrc = [masterVariant.image_link];
+    }
+    
+    allVariants.push(masterVariantInput);
+    
+    // Agregar variantes adicionales (omitir la primera que ya incluimos)
+    allVariants.push(...variantsInput.map(variant => ({
+      price: variant.price,
+      inventoryPolicy: variant.inventoryPolicy,
+      sku: variant._pendingSku ? sanitize(variant._pendingSku.toString()) : undefined,
+      barcode: variant.barcode,
+      optionValues: variant.optionValues,
+      mediaSrc: variant.mediaSrc
+    })));
+
     const rawResponse = await withRetry(() =>
-      admin.graphql(VARIANTS_BULK_CREATE, {
+      admin.graphql(VARIANTS_SET, {
         variables: {
           productId: product.id,
-          variants: variantsInput
+          variants: allVariants
         }
       })
     );
 
     const responseData = await parseGraphQLResponse(rawResponse);
 
-    const errors = responseData?.data?.productVariantsBulkCreate?.userErrors || [];
+    const errors = responseData?.data?.productVariantsSet?.userErrors || [];
     if (errors.length) {
-      log(`❌ Error creando variantes:`, errors);
+      log(`❌ Error estableciendo variantes:`, errors);
       return { success: false, error: errors };
     }
 
-    const createdVariants = responseData?.data?.productVariantsBulkCreate?.productVariants || [];
+    const createdVariants = responseData?.data?.productVariantsSet?.productVariants || [];
     
     if (CONFIG.LOG) {
-      log(`✅ ${createdVariants.length} variantes creadas exitosamente`);
+      log(`✅ ${createdVariants.length} variantes establecidas exitosamente con SKUs`);
     }
-
-    // --- Paso 2: Asignar SKUs individualmente a las variantes creadas ---
-    await assignSkusToVariants(admin, createdVariants, variantsInput);
 
     return { success: true, variants: createdVariants };
     
   } catch (error) {
     log(`💥 Error creando variantes: ${error.message}`);
     return { success: false, error: error.message };
-  }
-}
-
-// Función para asignar SKUs a variantes ya creadas
-async function assignSkusToVariants(admin, createdVariants, variantsInput) {
-  if (!createdVariants || createdVariants.length === 0) {
-    return;
-  }
-
-  if (CONFIG.LOG) {
-    log(`🏷️ Asignando SKUs a ${createdVariants.length} variantes...`);
-  }
-
-  // Crear mutation para actualizar variante individual
-  const VARIANT_UPDATE_INDIVIDUAL = `
-    mutation updateProductVariant($productVariant: ProductVariantUpdateInput!) {
-      productVariantUpdate(productVariant: $productVariant) {
-        productVariant { 
-          id 
-          sku 
-          price 
-        }
-        userErrors { 
-          field 
-          message 
-        }
-      }
-    }
-  `;
-
-  // Recorrer cada variante creada y asignar su SKU correspondiente
-  for (let i = 0; i < createdVariants.length; i++) {
-    const createdVariant = createdVariants[i];
-    const originalVariant = variantsInput[i]; // Mismo orden
-
-    // Verificar si la variante original tiene SKU pendiente
-    if (originalVariant && originalVariant._pendingSku) {
-      try {
-        const updateInput = {
-          id: createdVariant.id,
-          sku: sanitize(originalVariant._pendingSku.toString())
-        };
-
-        if (CONFIG.LOG) {
-          log(`🏷️ Asignando SKU "${updateInput.sku}" a variante ${createdVariant.id}`);
-        }
-
-        const rawResponse = await withRetry(() =>
-          admin.graphql(VARIANT_UPDATE_INDIVIDUAL, {
-            variables: {
-              productVariant: updateInput
-            }
-          })
-        );
-
-        const responseData = await parseGraphQLResponse(rawResponse);
-        
-        const errors = responseData?.data?.productVariantUpdate?.userErrors || [];
-        if (errors.length) {
-          log(`⚠️ Error asignando SKU a variante ${createdVariant.id}:`, errors);
-        } else {
-          if (CONFIG.LOG) {
-            log(`✅ SKU asignado exitosamente a variante ${createdVariant.id}`);
-          }
-        }
-
-        // Pequeña pausa para evitar rate limiting
-        await sleep(50);
-
-      } catch (error) {
-        log(`❌ Error asignando SKU a variante ${createdVariant.id}:`, error.message);
-      }
-    }
-  }
-
-  if (CONFIG.LOG) {
-    log(`🏷️ Proceso de asignación de SKUs completado`);
   }
 }
 
