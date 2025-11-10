@@ -550,15 +550,14 @@ const PRODUCT_UPDATE = `
   }
 `;
 
-const VARIANT_UPDATE = `
-  mutation updateVariantBulk($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
-    productVariantsBulkUpdate(productId: $productId, variants: $variants) {
-      productVariants { 
+const VARIANT_UPDATE_INDIVIDUAL = `
+  mutation updateProductVariant($productVariant: ProductVariantUpdateInput!) {
+    productVariantUpdate(productVariant: $productVariant) {
+      productVariant { 
         id 
         sku 
         barcode 
         price 
-        inventoryQuantity
       }
       userErrors { field message }
     }
@@ -1398,21 +1397,20 @@ async function updateDefaultVariant(admin, variantId, p, productId = null) {
     variantInput.optionValues = optionValues;
     
     if (CONFIG.LOG) {
-      log(`🔧 Actualizando variante ${variantId} del producto ${actualProductId}:`, variantInput);
+      log(`🔧 Actualizando variante ${variantId}:`, variantInput);
     }
     
     const rawResponse = await withRetry(() =>
-      admin.graphql(VARIANT_UPDATE, { 
+      admin.graphql(VARIANT_UPDATE_INDIVIDUAL, { 
         variables: { 
-          productId: actualProductId,
-          variants: [variantInput]
+          productVariant: variantInput  // Nota: productVariant, no productId + variants
         } 
       })
     );
     
     const responseData = await parseGraphQLResponse(rawResponse);
     
-    const errors = responseData?.data?.productVariantsBulkUpdate?.userErrors || [];
+    const errors = responseData?.data?.productVariantUpdate?.userErrors || [];
     if (errors.length) {
       log(`❌ Error actualizando variante:`, errors);
     } else {
@@ -1468,16 +1466,15 @@ async function updateShopifyProduct(admin, existing, p) {
 
     if (Object.keys(vInput).length > 1) { // Más que solo id
       const rawResponse2 = await withRetry(() =>
-        admin.graphql(VARIANT_UPDATE, { 
+        admin.graphql(VARIANT_UPDATE_INDIVIDUAL, { 
           variables: { 
-            productId: existing.id,
-            variants: [vInput]
+            productVariant: vInput  // Nota: productVariant, no productId + variants
           } 
         })
       );
       
       const responseData2 = await parseGraphQLResponse(rawResponse2);
-      const errs2 = responseData2?.data?.productVariantsBulkUpdate?.userErrors || [];
+      const errs2 = responseData2?.data?.productVariantUpdate?.userErrors || [];
       if (errs2.length) return { success: false };
     }
   }
