@@ -564,10 +564,10 @@ const VARIANT_UPDATE_INDIVIDUAL = `
   }
 `;
 
-const VARIANTS_SET = `
-  mutation setVariants($productId: ID!, $variants: [ProductVariantSetInput!]!) {
-    productVariantsSet(productId: $productId, variants: $variants) {
-      productVariants {
+const VARIANT_CREATE_INDIVIDUAL = `
+  mutation createProductVariant($productVariant: ProductVariantCreateInput!) {
+    productVariantCreate(productVariant: $productVariant) {
+      productVariant {
         id
         title
         sku
@@ -598,6 +598,39 @@ const PRODUCT_CREATE_MEDIA = `
       product {
         id
         title
+      }
+    }
+  }
+`;
+
+const PRODUCT_SET = `
+  mutation productSet($input: ProductSetInput!) {
+    productSet(input: $input) {
+      product {
+        id
+        title
+        handle
+        vendor
+        status
+        variants(first: 50) {
+          edges {
+            node {
+              id
+              title
+              sku
+              barcode
+              price
+              selectedOptions {
+                name
+                value
+              }
+            }
+          }
+        }
+      }
+      userErrors { 
+        field 
+        message 
       }
     }
   }
@@ -1203,24 +1236,37 @@ async function createProductVariants(admin, product, variants) {
       mediaSrc: variant.mediaSrc
     })));
 
+    // Preparar el input para productSet usando ProductVariantSetInput
+    const productSetInput = {
+      id: product.id,
+      variants: allVariants.map(variant => ({
+        price: variant.price,
+        inventoryPolicy: variant.inventoryPolicy,
+        sku: variant.sku,
+        barcode: variant.barcode,
+        optionValues: variant.optionValues,
+        mediaSrc: variant.mediaSrc
+      }))
+    };
+
     const rawResponse = await withRetry(() =>
-      admin.graphql(VARIANTS_SET, {
+      admin.graphql(PRODUCT_SET, {
         variables: {
-          productId: product.id,
-          variants: allVariants
+          input: productSetInput
         }
       })
     );
 
     const responseData = await parseGraphQLResponse(rawResponse);
 
-    const errors = responseData?.data?.productVariantsSet?.userErrors || [];
+    const errors = responseData?.data?.productSet?.userErrors || [];
     if (errors.length) {
       log(`❌ Error estableciendo variantes:`, errors);
       return { success: false, error: errors };
     }
 
-    const createdVariants = responseData?.data?.productVariantsSet?.productVariants || [];
+    const updatedProduct = responseData?.data?.productSet?.product || {};
+    const createdVariants = updatedProduct.variants?.edges?.map(edge => edge.node) || [];
     
     if (CONFIG.LOG) {
       log(`✅ ${createdVariants.length} variantes establecidas exitosamente con SKUs`);

@@ -1,5 +1,18 @@
 # Lector XML Proveedor - Changelog
 
+## v1.4.1 - 2025.11.10
+
+### 🔧 API de Variantes SKU
+- **FIXED**: Migración de `productVariantsSet` (no existe) a `productSet` mutation
+- **NEW**: Implementación de `ProductSetInput` con `ProductVariantSetInput` para soporte completo de SKUs
+- **IMPROVED**: Asignación correcta de SKUs a nivel de variante usando API oficial
+- **UPDATED**: Mutación `PRODUCT_SET` para gestión completa de productos y variantes
+
+### 📚 Compatibilidad GraphQL
+- **FIXED**: Resolución de error "Field sku is not defined on ProductVariantsBulkInput"
+- **IMPROVED**: Uso de mutations GraphQL Admin API 2024.10 oficiales
+- **OPTIMIZED**: Estructura de datos compatible con Shopify API v2024.10
+
 ## v1.4.0 - 2025.11.10
 
 ### 🚀 Optimización de Rendimiento
