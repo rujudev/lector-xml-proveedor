@@ -1,4 +1,4 @@
-import { createReadableStreamFromReadable } from "@react-router/node";
+import { createReadableStreamFromReadable } from '@react-router/node';
 import { isbot } from "isbot";
 import process from "process";
 import { renderToPipeableStream } from "react-dom/server";

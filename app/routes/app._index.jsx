@@ -1,360 +1,829 @@
-import { boundary } from "@shopify/shopify-app-react-router/server";
-import { useEffect } from "react";
-import { useFetcher } from "react-router";
-import { authenticate } from "../shopify.server";
-import { parseProductsFromXML } from "../services/xml-sync.server.js";
+import React, { useEffect, useState } from "react";
+import { useFetcher, useLoaderData } from "react-router";
+import { authenticate } from "../shopify.server.js";
+import styles from "./app._index/styles.module.css";
 
-// Función para crear productos en Shopify por lotes
-async function createShopifyProducts(admin, products, batchSize = 10, maxProducts = 50) {
-  const results = [];
-  const errors = [];
-  
-  // Limitar el número total de productos a procesar
-  const productsToProcess = products.slice(0, maxProducts);
-  
-  console.log(`Procesando ${productsToProcess.length} productos en lotes de ${batchSize}`);
-
-  // Procesar en lotes para evitar timeouts
-  for (let i = 0; i < productsToProcess.length; i += batchSize) {
-    const batch = productsToProcess.slice(i, i + batchSize);
-    console.log(`Procesando lote ${Math.floor(i / batchSize) + 1}/${Math.ceil(productsToProcess.length / batchSize)}: productos ${i + 1}-${Math.min(i + batchSize, productsToProcess.length)}`);
-
-    // Procesar cada producto en el lote
-    for (const product of batch) {
-      const shopifyProduct = {
-        title: product.title,
-        descriptionHtml: product.description,
-        vendor: product.vendor,
-        productType: product.productType,
-        tags: Array.isArray(product.tags) ? product.tags.join(', ') : product.tags,
-      };
-
-      try {
-        const response = await admin.graphql(
-          `#graphql
-          mutation productCreate($product: ProductCreateInput!) {
-            productCreate(product: $product) {
-              product {
-                id
-                title
-                handle
-                status
-                variants(first: 1) {
-                  edges {
-                    node {
-                      id
-                    }
-                  }
-                }
-              }
-              userErrors {
-                field
-                message
-              }
-            }
-          }`,
-          {
-            variables: {
-              product: shopifyProduct,
-            },
-          },
-        );
-
-        const responseJson = await response.json();
-        
-        // Verificar si hay errores de GraphQL
-        if (responseJson.errors) {
-          console.error(`GraphQL errors para producto ${product.title}:`, responseJson.errors.map(e => e.message).join(', '));
-          errors.push({
-            product: product.title,
-            errors: responseJson.errors,
-          });
-        } else if (responseJson.data.productCreate.userErrors.length > 0) {
-          console.error(`User errors para producto ${product.title}:`, responseJson.data.productCreate.userErrors.map(e => e.message).join(', '));
-          errors.push({
-            product: product.title,
-            errors: responseJson.data.productCreate.userErrors,
-          });
-        } else {
-          const createdProduct = responseJson.data.productCreate.product;
-          
-          // Actualizar variantes usando REST API si tenemos datos específicos
-          if (product.variants?.length > 0 && createdProduct.variants.edges.length > 0) {
-            try {
-              // Extraer el ID numérico del product ID de GraphQL (gid://shopify/Product/123456789)
-              const numericProductId = createdProduct.id.split('/').pop();
-              
-              // Obtener el producto para actualizar sus variantes
-              const productToUpdate = new admin.rest.Product({ session: admin.session });
-              productToUpdate.id = parseInt(numericProductId);
-              
-              // Obtener las variantes existentes del producto
-              const existingProduct = await admin.rest.Product.find({
-                session: admin.session,
-                id: parseInt(numericProductId)
-              });
-
-              if (existingProduct?.variants && existingProduct.variants.length > 0) {
-                // Actualizar la primera variante con los datos del XML
-                const firstVariant = product.variants[0];
-                const variantToUpdate = new admin.rest.Variant({ session: admin.session });
-                
-                variantToUpdate.id = existingProduct.variants[0].id;
-                variantToUpdate.price = firstVariant.price;
-                variantToUpdate.sku = firstVariant.sku;
-                
-                await variantToUpdate.save();
-              }
-              
-            } catch (restError) {
-              console.error(`Error actualizando variantes REST para ${product.title}:`, restError.message);
-            }
-          }
-          
-          results.push(createdProduct);
-        }
-      } catch (error) {
-        errors.push({
-          product: product.title,
-          errors: [{ message: error.message }],
-        });
-      }
+// CSS inline para animaciones
+const animationStyles = `
+  @keyframes fadeInSlide {
+    from {
+      opacity: 0;
+      transform: translateY(-10px);
     }
-
-    // Pausa entre lotes para no sobrecargar la API
-    if (i + batchSize < productsToProcess.length) {
-      await new Promise(resolve => setTimeout(resolve, 1000));
+    to {
+      opacity: 1;
+      transform: translateY(0);
     }
   }
-
-  return { results, errors };
-}
+  
+  @keyframes spin {
+    from {
+      transform: rotate(0deg);
+    }
+    to {
+      transform: rotate(360deg);
+    }
+  }
+`;
 
 export const action = async ({ request }) => {
-  const { admin } = await authenticate.admin(request);
+  console.error('🚨 [ACTION] Action ejecutado - Método:', request.method);
   
   if (request.method !== "POST") {
     return Response.json({ error: "Method not allowed" }, { status: 405 });
   }
 
   try {
+    const { session } = await authenticate.admin(request);
+    console.error('✅ [ACTION] Autenticación exitosa');
+    
     const formData = await request.formData();
     const xmlUrl = formData.get("xmlUrl");
-    const maxProducts = parseInt(formData.get("maxProducts") || "100");
-    const batchSize = parseInt(formData.get("batchSize") || "10");
-
+    
     if (!xmlUrl) {
       return Response.json({ error: "URL del XML es requerida" }, { status: 400 });
     }
 
-    // Validaciones
-    if (maxProducts > 500) {
-      return Response.json({ error: "Máximo 500 productos por procesamiento" }, { status: 400 });
-    }
-
-    if (batchSize > 50) {
-      return Response.json({ error: "Máximo 50 productos por lote" }, { status: 400 });
-    }
-
-    // Descargar XML
-    const response = await fetch(xmlUrl, {
-      method: 'GET',
-      headers: {
-        'Accept': 'application/xml, text/xml, */*',
-        'User-Agent': 'Lector-XML-Proveedor/1.0',
-      },
-    });
-
-    if (!response.ok) {
-      return Response.json({ 
-        error: `Error al descargar XML: ${response.status} ${response.statusText}` 
-      }, { status: 400 });
-    }
-
-    const xmlContent = await response.text();
-    const parsedProducts = parseProductsFromXML(xmlContent);
-
+  // Usar parseXMLData para obtener estadísticas de variantes y estructuración completa
+  const { parseXMLData } = await import("../services/xml-sync.server.js");
+  
+  // Solo parsear (sin admin = solo parsing y estadísticas, no creación en Shopify)
+  const parsedProducts = await parseXMLData(xmlUrl, null, null);
+    
     if (!parsedProducts || parsedProducts.length === 0) {
-      return Response.json({ 
-        error: "No se encontraron productos válidos en el XML" 
-      }, { status: 400 });
+      return Response.json({ error: "No se encontraron productos en el XML" }, { status: 400 });
     }
 
-    console.log(`Iniciando procesamiento: ${parsedProducts.length} productos encontrados, procesando máximo ${maxProducts} en lotes de ${batchSize}`);
+    console.error(`📦 [ACTION] Parseados ${parsedProducts.length} productos con variantes - enviando al cliente`);
 
-    const { results, errors } = await createShopifyProducts(admin, parsedProducts, batchSize, maxProducts);
-
+    const shopDomain = session.shop.replace('.myshopify.com', '');
+    
+    // Devolver productos parseados al cliente
     return Response.json({
       success: true,
-      totalFound: parsedProducts.length,
-      created: results.length,
-      errors: errors.length,
-      results,
-      errorDetails: errors,
-      wasLimited: parsedProducts.length > maxProducts,
+      totalProducts: parsedProducts.length,
+      products: parsedProducts, // ← Los productos van al cliente
+      message: 'XML parseado exitosamente',
+      shopDomain,
+      parsedAt: new Date().toISOString()
     });
+
   } catch (error) {
-    console.error("Error procesando XML:", error);
+    console.error('❌ [ACTION] Error:', error);
     return Response.json({ 
-      error: `Error procesando productos: ${error.message}` 
+      error: error.message || "Error parseando XML",
+      success: false 
     }, { status: 500 });
   }
 };
 
+export const loader = async ({ request }) => {
+  const { session } = await authenticate.admin(request);
+  const { getSyncProgress } = await import("../services/sync-progress.server.js");
+
+  const shopDomain = session.shop.replace('.myshopify.com', '');
+  const currentProgress = await getSyncProgress(shopDomain);
+
+  return Response.json({
+    progress: currentProgress,
+    shop: shopDomain,
+    sessionId: session.id
+  });
+};
+
 export default function Index() {
+  console.warn('🎯 [CLIENT] Renderizando componente');
+
   const fetcher = useFetcher();
+  const loaderData = useLoaderData();
+  const [syncState, setSyncState] = useState(null); // Estado unificado
+
+  // Nuevo estado para la tabla de productos
+  const [processedProducts, setProcessedProducts] = useState([]);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [productsPerPage] = useState(20);
+  const [expandedProduct, setExpandedProduct] = useState(null); // Para mostrar detalles de productos
+
+  // Cálculo de paginación
+  const totalPages = Math.ceil((processedProducts?.length || 0) / productsPerPage);
+  const startIndex = (currentPage - 1) * productsPerPage;
+  const endIndex = startIndex + productsPerPage;
+  const currentProducts = (processedProducts || []).slice(startIndex, endIndex);
+
+  const actionData = fetcher.data;
+  const isLoading = fetcher.state === "submitting";
+  const sessionId = loaderData?.sessionId;
+
+  const PROCESSED_TYPE = {
+    'created': 'Creado',
+    'updated': 'Actualizado',
+    'skipped': 'Omitido',
+    'error': 'Error',
+    'product_error': 'Error'
+  }
+
+  // Función unificada para actualizar el estado del sync
+  const updateSyncState = (data, type) => {
+    setSyncState(prev => {
+      const newProduct = {
+        id: Date.now() + Math.random(),
+        title: data.productTitle,
+        type: type,
+        timestamp: Date.now(),
+        sku: data.productSku,
+        timing: data.timing
+      };
+      
+      const updatedProducts = prev?.recentProducts ? [newProduct, ...prev.recentProducts.slice(0, 9)] : [newProduct];
+      
+      // Calcular estadísticas más detalladas
+      const newStats = {
+        processedItems: data.processed,
+        totalItems: data.total,
+        createdItems: prev?.createdItems || 0,
+        updatedItems: prev?.updatedItems || 0,
+        skippedItems: prev?.skippedItems || 0,
+        errorItems: prev?.errorItems || 0,
+        currentStep: `${type.charAt(0).toUpperCase() + type.slice(1)}: ${data.productTitle}`,
+        status: 'syncing',
+        isActive: true,
+        recentProducts: updatedProducts
+      };
+
+      // Incrementar el contador específico según el tipo
+      if (type === 'created') {
+        newStats.createdItems = (prev?.createdItems || 0) + 1;
+      } else if (type === 'updated') {
+        newStats.updatedItems = (prev?.updatedItems || 0) + 1;
+      } else if (type === 'skipped') {
+        newStats.skippedItems = (prev?.skippedItems || 0) + 1;
+      } else if (type === 'product_error' || type === 'error') {
+        newStats.errorItems = (prev?.errorItems || 0) + 1;
+        newStats.currentStep = `Error: ${data.error || 'Error de procesamiento'}`;
+      }
+
+      return newStats;
+    });
+
+    // Agregar producto a la tabla principal
+    setProcessedProducts(prev => {
+      const prevArray = prev || [];
+      const productData = {
+        id: data.productId || `${Date.now()}_${Math.random()}`,
+        title: data.productTitle,
+        sku: data.productSku,
+        type: type,
+        action: type === 'created' ? 'Creado' : 
+                type === 'updated' ? 'Actualizado' : 
+                type === 'error' || type === 'product_error' ? 'Error' : 'Omitido',
+        timestamp: new Date().toLocaleString('es-ES'),
+        price: data.price || 'N/A',
+        vendor: data.vendor || 'Sin marca',
+        tags: data.tags || '',
+        condition: data.condition || 'nuevo',
+        deviceType: data.deviceType || 'android',
+        availability: data.availability || 'in_stock',
+        timing: data.timing,
+        errorMessage: data.error || null, // Para productos con errores
+        variants: data.variants || [] // Para mostrar variantes
+      };
+      
+      return [productData, ...prevArray];
+    });
+  };
 
   useEffect(() => {
-    if (fetcher.data && fetcher.data.results) {
-      console.log("Productos creados:", fetcher.data);
-    }
-  }, [fetcher.data]);
+    console.warn('🔗 [SSE] Estableciendo conexión SSE persistente');
+    console.warn('🔗 [SSE] SessionId:', sessionId);
 
-  const isLoading = fetcher.state === "submitting";
+    const sseUrl = sessionId
+      ? `/api/sync-events?sessionId=${encodeURIComponent(sessionId)}`
+      : `/api/sync-events`;
+
+    console.warn('🔗 [SSE] URL:', sseUrl);
+
+    const eventSource = new EventSource(sseUrl);
+
+    eventSource.onopen = () => {
+      console.warn('🟢 [SSE] Conexión abierta exitosamente');
+    };
+
+    eventSource.onerror = (error) => {
+      console.error('❌ [SSE] Error de conexión:', error);
+    };
+
+    eventSource.addEventListener('connected', (event) => {
+      const data = JSON.parse(event.data);
+      console.warn('🔗 [SSE] Conectado a shop:', data.shop);
+    });
+
+    eventSource.addEventListener('sync_started', (event) => {
+      const data = JSON.parse(event.data);
+      console.warn(`🚀 [SSE] ${Date.now()} - SYNC STARTED:`, data.message, '- Total:', data.totalItems);
+      
+      // Reiniciar tabla de productos
+      setProcessedProducts([]);
+      setCurrentPage(1);
+      
+      // Inicializar estado de sync
+      setSyncState({
+        processedItems: 0,
+        createdItems: 0,
+        updatedItems: 0,
+        skippedItems: 0,
+        errorItems: 0,
+        totalItems: data.totalItems,
+        currentStep: 'Iniciando procesamiento...',
+        status: 'syncing',
+        isActive: true,
+        recentProducts: []
+      });
+    });
+
+    eventSource.addEventListener('created', (event) => {
+      const data = JSON.parse(event.data);
+      const timestamp = Date.now();
+      console.warn(`🆕 [SSE] ${timestamp} - CREATED: ${data.productTitle} (${data.processed}/${data.total})${data.timing ? ` [${data.timing.search + data.timing.create}ms]` : ''}`);
+      updateSyncState(data, 'created');
+    });
+
+    eventSource.addEventListener('updated', (event) => {
+      const data = JSON.parse(event.data);
+      const timestamp = Date.now();
+      console.warn(`📡 [SSE] ${timestamp} - UPDATED: ${data.productTitle} (${data.processed}/${data.total})${data.timing ? ` [${data.timing.search + data.timing.update}ms]` : ''}`);
+      updateSyncState(data, 'updated');
+    });
+
+    eventSource.addEventListener('skipped', (event) => {
+      const data = JSON.parse(event.data);
+      const timestamp = Date.now();
+      console.warn(`⏭️ [SSE] ${timestamp} - SKIPPED: ${data.productTitle} (${data.processed}/${data.total})`);
+      updateSyncState(data, 'skipped');
+    });
+
+    eventSource.addEventListener('processing', (event) => {
+      const data = JSON.parse(event.data);
+      console.warn(`⚙️ [SSE] PROCESSING: ${data.productTitle} (${data.processed}/${data.total}) - ${data.currentStep}`);
+      
+      setSyncState(prev => ({
+        ...prev,
+        currentStep: data.currentStep,
+        processedItems: data.processed,
+        totalItems: data.total
+      }));
+    });
+
+    eventSource.addEventListener('error', (event) => {
+      const data = JSON.parse(event.data);
+      const timestamp = Date.now();
+      console.warn(`❌ [SSE] ${timestamp} - ERROR: ${data.productTitle} - ${data.error}`);
+      updateSyncState(data, 'error');
+    });
+
+    eventSource.addEventListener('product_error', (event) => {
+      const data = JSON.parse(event.data);
+      const timestamp = Date.now();
+      console.warn(`❌ [SSE] ${timestamp} - PRODUCT_ERROR: ${data.product || data.productTitle} - ${data.error}`);
+      updateSyncState(data, 'product_error');
+    });
+
+    eventSource.addEventListener('sync_completed', (event) => {
+      const data = JSON.parse(event.data);
+      console.warn('🎉 [SSE] SYNC COMPLETED:', data.stats);
+
+      setSyncState(prev => ({
+        ...prev,
+        status: 'completed',
+        currentStep: `Completado: ${data.stats.created} creados, ${data.stats.updated} actualizados`,
+        processedItems: data.stats.processed,
+        createdItems: data.stats.created,
+        updatedItems: data.stats.updated,
+        errorItems: data.stats.errors,
+        totalItems: data.stats.totalVariantGroups,
+        completedAt: data.endTime,
+        isActive: false
+      }));
+    });
+
+    return () => {
+      console.warn('🔌 [SSE] Cerrando conexión');
+      eventSource.close();
+    };
+  }, [sessionId]);
+
+  // ✨ NUEVO: useEffect que inicia procesamiento cuando recibimos productos del action
+  useEffect(() => {
+    if (!actionData?.success || !actionData?.products) return;
+    
+    const startTime = performance.now();
+    console.warn(`🎯 [CLIENT] ${Date.now()} - Productos recibidos del action, iniciando procesamiento...`);
+    console.warn('🎯 [CLIENT] Productos:', actionData.products.length, 'Shop:', actionData.shopDomain);
+    
+    // Llamar al endpoint de procesamiento
+    const startProcessing = async () => {
+      try {
+        console.warn(`📤 [CLIENT] ${Date.now()} - Enviando productos para procesamiento...`);
+        
+        const response = await fetch('/api/process-products', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            products: actionData.products,
+            shopDomain: actionData.shopDomain
+          })
+        });
+        
+        const result = await response.json();
+        const endTime = performance.now();
+        
+        if (result.success) {
+          console.warn(`✅ [CLIENT] ${Date.now()} - Procesamiento iniciado exitosamente (${Math.round(endTime - startTime)}ms)`);
+          console.warn('🔄 [CLIENT] Esperando eventos SSE...');
+        } else {
+          console.error('❌ [CLIENT] Error iniciando procesamiento:', result.error);
+        }
+        
+      } catch (error) {
+        console.error('❌ [CLIENT] Error llamando procesamiento:', error);
+      }
+    };
+    
+    startProcessing();
+    
+  }, [actionData]); // ← Se ejecuta cuando actionData cambia
 
   return (
-    <s-page title="Lector XML Proveedor">
-      <s-section>
-        <s-card>
-          <s-block-stack gap="4">
-            <s-text variant="headingLg" as="h2">
-              Importar Productos desde XML
-            </s-text>
-            
-            <fetcher.Form method="post">
-              <s-block-stack gap="4">
-                <s-form-layout>
-                  <s-text-field
-                    label="URL del archivo XML"
-                    name="xmlUrl"
-                    placeholder="https://ejemplo.com/productos.xml"
-                    required
-                    helpText="URL pública del archivo XML con los productos del proveedor"
-                  />
-                  
-                  <s-inline-stack gap="4">
-                    <s-text-field
-                      label="Máximo productos"
-                      name="maxProducts"
-                      type="number"
-                      value="100"
-                      min="1"
-                      max="500"
-                      helpText="Número máximo de productos a procesar (máx. 500)"
-                    />
-                    
-                    <s-text-field
-                      label="Tamaño del lote"
-                      name="batchSize"
-                      type="number"
-                      value="10"
-                      min="1"
-                      max="50"
-                      helpText="Productos por lote (máx. 50)"
-                    />
-                  </s-inline-stack>
-                </s-form-layout>
-
-                <s-button
-                  variant="primary"
-                  loading={isLoading}
-                  disabled={isLoading}
-                  submit
-                >
-                  {isLoading ? "Procesando..." : "Importar Productos"}
-                </s-button>
-              </s-block-stack>
-            </fetcher.Form>
-          </s-block-stack>
-        </s-card>
-
-        {fetcher.data?.wasLimited && (
-          <s-banner tone="warning">
-            <p>
-              <strong>Procesamiento parcial:</strong> Se encontraron {fetcher.data.totalFound} productos, 
-              pero solo se procesaron {fetcher.data.created} debido al límite configurado.
-            </p>
-            <p>
-              Para procesar más productos, aumenta el valor de &quot;Máximo productos&quot; o usa la 
-              funcionalidad de sincronización automática en la página de proveedores.
-            </p>
-          </s-banner>
-        )}
-
-        {fetcher.data?.results && (
+    <div className={styles.xmlApp}>
+      <style dangerouslySetInnerHTML={{ __html: animationStyles }} />
+      
+      <s-page heading="Importar Productos desde XML">
+        
+        {/* SECCIÓN PRINCIPAL DE IMPORTACIÓN */}
+        <s-section>
           <s-card>
-            <s-block-stack gap="4">
-              <s-text variant="headingMd" as="h3">
-                Resultados de la Importación
-              </s-text>
-              
-              <s-inline-stack gap="4">
-                <s-badge tone="success">
-                  {fetcher.data.created} creados
-                </s-badge>
-                
-                {fetcher.data.errors > 0 && (
-                  <s-badge tone="critical">
-                    {fetcher.data.errors} errores
+            <s-stack gap="base">
+              <s-stack gap="base" horizontal alignment="space-between">
+                <s-text variant="heading-md">
+                  📦 Importar Productos desde XML
+                </s-text>
+                <s-stack gap="tight" horizontal>
+                  <s-badge tone="success" size="small">
+                    ⚡ OPTIMIZADO
                   </s-badge>
-                )}
-                
-                <s-badge>
-                  {fetcher.data.totalFound} total encontrados
-                </s-badge>
-              </s-inline-stack>
-
-              {fetcher.data.results.length > 0 && (
-                <s-block-stack gap="2">
-                  <s-text variant="headingSm" as="h4">
-                    Productos creados exitosamente:
-                  </s-text>
-                  
-                  {fetcher.data.results.slice(0, 10).map((product, index) => (
-                    <s-inline-stack key={index} gap="2" wrap="no-wrap">
-                      <s-badge>#{product.id.split('/').pop()}</s-badge>
-                      <s-text as="span" truncate>{product.title}</s-text>
-                    </s-inline-stack>
-                  ))}
-                  
-                  {fetcher.data.results.length > 10 && (
-                    <s-text tone="subdued">
-                      ... y {fetcher.data.results.length - 10} productos más
-                    </s-text>
+                  {syncState?.status === 'syncing' && (
+                    <s-spinner size="small" />
                   )}
-                </s-block-stack>
-              )}
+                </s-stack>
+              </s-stack>
 
-              {fetcher.data.errorDetails && fetcher.data.errorDetails.length > 0 && (
-                <s-block-stack gap="2">
-                  <s-text variant="headingSm" as="h4" tone="critical">
-                    Errores encontrados:
-                  </s-text>
-                  
-                  {fetcher.data.errorDetails.slice(0, 5).map((error, index) => (
-                    <s-block-stack key={index} gap="1">
-                      <s-text as="span" fontWeight="semibold">{error.product}</s-text>
-                      <s-text as="span" tone="subdued" size="small">
-                        {error.errors.map(e => e.message).join(', ')}
-                      </s-text>
-                    </s-block-stack>
-                  ))}
-                  
-                  {fetcher.data.errorDetails.length > 5 && (
-                    <s-text tone="subdued">
-                      ... y {fetcher.data.errorDetails.length - 5} errores más
-                    </s-text>
-                  )}
-                </s-block-stack>
-              )}
-            </s-block-stack>
+              <s-text variant="body-md" tone="subdued">
+                Importa productos desde un feed XML de Google Shopping con procesamiento optimizado en tiempo real. 
+                ⚡ <strong>Hasta 6 productos simultáneos</strong> con cache inteligente y rate limiting.
+              </s-text>
+
+              <fetcher.Form method="post">
+                <s-stack gap="base">
+                  <s-text-field
+                    label="URL del XML"
+                    name="xmlUrl"
+                    type="url"
+                    placeholder="https://ejemplo.com/feed.xml"
+                    required
+                    details="URL del feed XML con los productos de Google Shopping"
+                    disabled={syncState?.status === 'syncing'}
+                  />
+
+                  <s-button
+                    variant="primary"
+                    type="submit"
+                    loading={isLoading}
+                    disabled={isLoading || syncState?.status === 'syncing'}
+                    size="large"
+                  >
+                    {isLoading ? "🔍 Analizando XML..." : 
+                     syncState?.status === 'syncing' ? "🚀 Procesando..." : 
+                     "📥 Importar Productos"}
+                  </s-button>
+                </s-stack>
+              </fetcher.Form>
+            </s-stack>
           </s-card>
+        </s-section>
+ 
+        {/* SECCIÓN DE PROGRESO EN TIEMPO REAL */}
+        {syncState?.isActive && (
+          <s-section>
+            <s-stack rowGap="large-100">
+              <s-stack rowGap="large-100">
+                <s-stack direction="inline" columnGap="large">
+                  <s-text variant="heading-sm" fontWeight="semibold">
+                    🚀 Procesamiento en Tiempo Real
+                  </s-text>
+                  <s-badge 
+                    tone={syncState?.status === 'completed' ? 'success' : 'info'} 
+                    size="small"
+                  >
+                    {syncState?.status === 'completed' ? '🎉 Completado' : '⚡ En Progreso'}
+                  </s-badge>
+                </s-stack>
+
+                {/* BARRA DE PROGRESO VISUAL */}
+                <s-stack rowGap="large">
+                  <s-progress-bar 
+                    progress={((syncState?.processedItems || 0) / (syncState?.totalItems || 1)) * 100}
+                    size="small"
+                  />
+                  <s-stack direction="inline" columnGap="base" blockSize="auto" justifyContent="center">
+                    <s-text variant="body-sm" tone="subdued">
+                      {syncState?.processedItems || 0} / {syncState?.totalItems || 0} productos
+                    </s-text>
+                    <s-divider direction="block" />
+                    <s-text variant="caption" tone="subdued">
+                      {Math.round(((syncState?.processedItems || 0) / (syncState?.totalItems || 1)) * 100)}% completado
+                    </s-text>
+                  </s-stack>
+                </s-stack>
+              </s-stack>
+
+              {/* ESTADÍSTICAS EN TIEMPO REAL */}
+              <s-stack gap="base" horizontal>
+                <s-grid gridTemplateColumns="repeat(auto-fit, minmax(100px, 1fr))" gap="base">
+                  {/* PRODUCTOS NUEVOS */}
+                  <s-box background="subdued" border="base" borderRadius="base" borderColor="base" padding="large">
+                    <s-stack rowGap="large" justifyContent="center" alignItems="center">
+                      <s-text accessibilityRole="" fontWeight="bold" tone="success" >
+                        {syncState?.createdItems || 0}
+                      </s-text>
+                      <s-badge tone="success" size="small">
+                        🆕 Nuevos
+                      </s-badge>
+                    </s-stack>
+                  </s-box>
+
+                  {/* PRODUCTOS ACTUALIZADOS */}
+                  <s-box background="subdued" border="base" borderRadius="base" borderColor="base" padding="large">
+                    <s-stack rowGap="large" justifyContent="center" alignItems="center">
+                      <s-text variant="heading-lg" fontWeight="bold" tone="info">
+                        {syncState?.updatedItems || 0}
+                      </s-text>
+                      <s-badge tone="info" size="small">
+                        🔄 Actualizados
+                      </s-badge>
+                    </s-stack>
+                  </s-box>
+
+                  {/* PRODUCTOS OMITIDOS */}
+                  <s-box background="subdued" border="base" borderRadius="base" borderColor="base" padding="large">
+                    <s-stack rowGap="large" justifyContent="center" alignItems="center">
+                      <s-text variant="heading-lg" fontWeight="bold" tone="warning">
+                        {syncState?.skippedItems || 0}
+                      </s-text>
+                      <s-badge tone="warning" size="small">
+                        ⏭️ Omitidos
+                      </s-badge>
+                    </s-stack>
+                  </s-box>
+
+                  {/* ERRORES */}
+                  {syncState?.errorItems > 0 && (
+                  <s-box background="subdued" border="base" borderRadius="base" borderColor="base" padding="large">
+                    <s-stack rowGap="large" justifyContent="center" alignItems="center">
+                      <s-text variant="heading-lg" fontWeight="bold" tone="critical">
+                        {syncState?.errorItems}
+                      </s-text>
+                      <s-badge tone="critical" size="small">
+                        ❌ Errores
+                      </s-badge>
+                    </s-stack>
+                  </s-box>
+                  )}
+  
+                  {/* TOTAL PROCESADOS */}
+                  <s-box background="subdued" border="base" borderRadius="base" borderColor="base" padding="large">
+                    <s-stack rowGap="large" justifyContent="center" alignItems="center">
+                      <s-text variant="heading-lg" fontWeight="bold">
+                        {syncState?.processedItems || 0}
+                      </s-text>
+                      <s-badge size="small">
+                        📊 Total
+                      </s-badge>
+                    </s-stack>
+                  </s-box>
+                </s-grid>
+
+                {/* ESTADO ACTUAL */}
+                <s-card>
+                  <div style={{
+                    padding: '16px',
+                    borderLeft: '4px solid #007bff'
+                  }}>
+                    <s-text variant="body-sm" fontWeight="semibold">
+                      📍 Estado Actual:
+                    </s-text>
+                    <s-text variant="body-sm" tone="subdued">
+                      {syncState?.currentStep || 'Preparando...'}
+                    </s-text>
+                  </div>
+                </s-card>
+              </s-stack>
+            </s-stack>
+          </s-section>
         )}
-      </s-section>
-    </s-page>
+
+        {/* FEED DE PRODUCTOS EN TIEMPO REAL */}
+        {syncState?.recentProducts?.length > 0 && (
+          <s-section>
+            <s-card>
+              <s-stack gap="base">
+                <s-stack gap="base" horizontal alignment="space-between">
+                  <s-text variant="heading-sm" fontWeight="semibold">
+                    🔄 Feed en Tiempo Real
+                  </s-text>
+                  <s-badge tone="info">
+                    {syncState.recentProducts.length} productos recientes
+                  </s-badge>
+                </s-stack>
+                
+                <s-list>
+                  {syncState.recentProducts.map((item) => (
+                    <s-list-item key={item.id}>
+                      <s-box direction="inline" paddingBlock="base">
+                        <s-stack direction="inline" alignItems="stretch" justifyContent="space-between">
+                          <s-badge 
+                            tone={
+                              item.type === 'created' ? 'success' : 
+                              item.type === 'updated' ? 'info' : 
+                              item.type === 'product_error' ? 'critical' : 'warning'
+                            }
+                            size="small"
+                          >
+                            {PROCESSED_TYPE[item.type]?.toUpperCase()}
+                          </s-badge>
+                          <s-text variant="body-sm" fontWeight="semibold">
+                            {item.title}
+                          </s-text>
+                          <s-badge tone="neutral" size="small">
+                            SKU: {item.sku || 'N/A'}
+                          </s-badge>
+                        </s-stack>
+                      </s-box>
+                    </s-list-item>
+                  ))}
+                </s-list>
+              </s-stack>
+            </s-card>
+          </s-section>
+        )}
+
+        {/* MENSAJE DE ÉXITO INICIAL */}
+        {actionData?.success && !syncState?.isActive && (
+          <s-section>
+            <s-card>
+              <s-banner tone="success">
+                <s-stack gap="tight">
+                  <s-text variant="body-md" fontWeight="semibold">
+                    ✅ XML parseado exitosamente
+                  </s-text>
+                  <s-text variant="body-sm">
+                    📦 {actionData.totalProducts} productos encontrados
+                  </s-text>
+                  <s-text variant="body-sm" tone="subdued">
+                    ⚡ Iniciando procesamiento optimizado (6 productos simultáneos)...
+                  </s-text>
+                </s-stack>
+              </s-banner>
+            </s-card>
+          </s-section>
+        )}
+
+        {/* MENSAJE DE ERROR */}
+        {actionData?.error && (
+          <s-section>
+            <s-card>
+              <s-banner tone="critical">
+                <s-stack gap="tight">
+                  <s-text variant="body-md" fontWeight="semibold">
+                    ❌ Error procesando XML
+                  </s-text>
+                  <s-text variant="body-sm">
+                    {actionData.error}
+                  </s-text>
+                </s-stack>
+              </s-banner>
+            </s-card>
+          </s-section>
+        )}
+
+        {/* TABLA DE PRODUCTOS PROCESADOS */}
+        {(processedProducts?.length || 0) > 0 && (
+          <s-section>
+            <s-card>
+              <s-stack gap="large">
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <s-text variant="heading-md" fontWeight="bold">
+                    📦 Productos Procesados ({processedProducts?.length || 0})
+                  </s-text>
+                  <s-text variant="body-sm" tone="subdued">
+                    Página {currentPage} de {totalPages}
+                  </s-text>
+                </div>
+
+                {/* TABLA DE PRODUCTOS */}
+                <s-table>
+                  <s-table-head>
+                    <s-table-row>
+                      <s-table-header-cell>Producto</s-table-header-cell>
+                      <s-table-header-cell>SKU</s-table-header-cell>
+                      <s-table-header-cell>Acción</s-table-header-cell>
+                      <s-table-header-cell>Marca</s-table-header-cell>
+                      <s-table-header-cell>Tipo</s-table-header-cell>
+                      <s-table-header-cell>Estado</s-table-header-cell>
+                      <s-table-header-cell>Info</s-table-header-cell>
+                    </s-table-row>
+                  </s-table-head>
+                  <s-table-body>
+                    {(currentProducts || []).map((product) => (
+                      <React.Fragment key={product.id}>
+                        <s-table-row>
+                          <s-table-cell>
+                            <div>
+                              <s-text variant="body-sm" fontWeight="semibold">
+                                {product.title}
+                              </s-text>
+                              <div style={{ display: 'flex', gap: '4px', marginTop: '4px' }}>
+                                <s-badge tone={product.deviceType === 'apple' ? 'info' : 'success'}>
+                                  {product.deviceType === 'apple' ? '🍎 Apple' : '🤖 Android'}
+                                </s-badge>
+                                <s-badge 
+                                  tone={
+                                    product.condition === 'usado' ? 'warning' : 
+                                    product.condition === 'reacondicionado' ? 'info' : 'success'
+                                  }
+                                >
+                                  {product.condition}
+                                </s-badge>
+                              </div>
+                              <s-text variant="caption" tone="subdued">
+                                {product.timestamp}
+                              </s-text>
+                            </div>
+                          </s-table-cell>
+                          <s-table-cell>
+                            <s-text variant="body-sm" tone="subdued">
+                              {product.sku || 'N/A'}
+                            </s-text>
+                          </s-table-cell>
+                          <s-table-cell>
+                            <s-badge 
+                              tone={
+                                product.type === 'created' ? 'success' : 
+                                product.type === 'updated' ? 'info' : 
+                                product.type === 'product_error' ? 'critical' : 'neutral'
+                              }
+                            >
+                              {product.action}
+                            </s-badge>
+                          </s-table-cell>
+                          <s-table-cell>
+                            <s-text variant="body-sm">
+                              {product.vendor || 'Sin marca'}
+                            </s-text>
+                          </s-table-cell>
+                          <s-table-cell>
+                            <s-text variant="body-sm" tone="subdued">
+                              {product.deviceType}
+                            </s-text>
+                          </s-table-cell>
+                          <s-table-cell>
+                            <s-badge tone={product.availability === 'in_stock' ? 'success' : 'warning'}>
+                              {product.availability === 'in_stock' ? 'En stock' : 'Agotado'}
+                            </s-badge>
+                          </s-table-cell>
+                          <s-table-cell>
+                            <s-button
+                              variant="plain"
+                              size="slim"
+                              onClick={() => setExpandedProduct(expandedProduct === product.id ? null : product.id)}
+                              aria-label={expandedProduct === product.id ? 'Ocultar detalles' : 'Ver detalles'}
+                            >
+                              {expandedProduct === product.id ? '▲' : '▼'}
+                            </s-button>
+                          </s-table-cell>
+                        </s-table-row>
+                        
+                        {/* FILA EXPANDIDA CON DETALLES */}
+                        {expandedProduct === product.id && (
+                          <s-table-row>
+                            <s-table-cell colspan="7">
+                              <s-card>
+                                <s-stack gap="base">
+                                  <s-text variant="body-sm" fontWeight="semibold">
+                                    📋 Detalles del Producto
+                                  </s-text>
+                                  
+                                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '12px' }}>
+                                    <div>
+                                      <s-text variant="caption" tone="subdued">ID del Producto:</s-text>
+                                      <s-text variant="body-sm">{product.id}</s-text>
+                                    </div>
+                                    <div>
+                                      <s-text variant="caption" tone="subdued">Precio:</s-text>
+                                      <s-text variant="body-sm">{product.price}</s-text>
+                                    </div>
+                                    <div>
+                                      <s-text variant="caption" tone="subdued">Tags:</s-text>
+                                      <s-text variant="body-sm">{product.tags || 'Sin tags'}</s-text>
+                                    </div>
+                                    {product.timing && (
+                                      <div>
+                                        <s-text variant="caption" tone="subdued">Tiempo de procesamiento:</s-text>
+                                        <s-text variant="body-sm">
+                                          {((product.timing.search || 0) + (product.timing.create || product.timing.update || 0))}ms
+                                        </s-text>
+                                      </div>
+                                    )}
+                                    {product.errorMessage && (
+                                      <div>
+                                        <s-text variant="caption" tone="critical">Error:</s-text>
+                                        <s-text variant="body-sm" tone="critical">{product.errorMessage}</s-text>
+                                      </div>
+                                    )}
+                                  </div>
+
+                                  {product.variants && product.variants.length > 0 && (
+                                    <div>
+                                      <s-text variant="body-sm" fontWeight="semibold">🔄 Variantes ({product.variants.length}):</s-text>
+                                      <s-stack gap="tight" style={{ marginTop: '8px' }}>
+                                        {product.variants.map((variant, idx) => (
+                                          <s-badge key={idx} tone="neutral">
+                                            {variant.title || variant.sku || `Variante ${idx + 1}`}
+                                          </s-badge>
+                                        ))}
+                                      </s-stack>
+                                    </div>
+                                  )}
+                                </s-stack>
+                              </s-card>
+                            </s-table-cell>
+                          </s-table-row>
+                        )}
+                      </React.Fragment>
+                    ))}
+                  </s-table-body>
+                </s-table>
+
+                {/* PAGINACIÓN */}
+                {totalPages > 1 && (
+                  <s-stack gap="base" horizontal alignment="space-between">
+                    <s-button
+                      variant="tertiary"
+                      onClick={() => setCurrentPage(Math.max(1, currentPage - 1))}
+                      disabled={currentPage === 1}
+                    >
+                      ← Anterior
+                    </s-button>
+                    
+                    <s-stack gap="tight" horizontal>
+                      {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
+                        const pageNum = Math.max(1, currentPage - 2) + i;
+                        if (pageNum <= totalPages) {
+                          return (
+                            <s-button
+                              key={pageNum}
+                              variant={currentPage === pageNum ? "primary" : "tertiary"}
+                              size="slim"
+                              onClick={() => setCurrentPage(pageNum)}
+                            >
+                              {pageNum}
+                            </s-button>
+                          );
+                        }
+                        return null;
+                      })}
+                    </s-stack>
+
+                    <s-button
+                      variant="tertiary"
+                      onClick={() => setCurrentPage(Math.min(totalPages, currentPage + 1))}
+                      disabled={currentPage === totalPages}
+                    >
+                      Siguiente →
+                    </s-button>
+                  </s-stack>
+                )}
+
+                <s-stack alignment="center">
+                  <s-text variant="caption" tone="subdued">
+                    Mostrando {startIndex + 1} - {Math.min(endIndex, processedProducts?.length || 0)} de {processedProducts?.length || 0} productos
+                  </s-text>
+                </s-stack>
+              </s-stack>
+            </s-card>
+          </s-section>
+        )}
+      </s-page>
+    </div>
   );
 }
-
-export const headers = (headersArgs) => {
-  return boundary.headers(headersArgs);
-};

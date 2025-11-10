@@ -1,5 +1,36 @@
 # Lector XML Proveedor - Changelog
 
+## v1.4.0 - 2025.11.10
+
+### 🚀 Optimización de Rendimiento
+- **NEW**: Procesamiento paralelo de productos con batches de 6 productos simultáneos
+- **NEW**: Función `processProductsParallel()` para mejorar performance ~4-5x
+- **IMPROVED**: Reducción del tiempo de procesamiento de 11-12 minutos a 2-3 minutos
+- **IMPROVED**: Optimización de agrupación de variantes (1,848 productos → 1,143 grupos)
+
+### ✨ Monitoreo en Tiempo Real
+- **NEW**: Sistema SSE (Server-Sent Events) completo para actualizaciones de progreso
+- **NEW**: Eventos detallados: `sync_started`, `processing`, `created`, `updated`, `error`, `sync_completed`
+- **NEW**: Función `sendProgressEvent()` integrada en todo el flujo de procesamiento
+- **NEW**: UI en tiempo real con indicadores de progreso por producto y totales
+
+### 🔧 Correcciones y Mejoras
+- **FIXED**: SKU ahora se asigna correctamente a nivel de variante (no producto base)
+- **FIXED**: Lógica de generación de SKU por prioridad: GTIN > MPN > g:id
+- **IMPROVED**: Compatibilidad completa con GraphQL Admin API v2024.10
+- **IMPROVED**: Manejo robusto de respuestas GraphQL con `parseGraphQLResponse()`
+
+### 🛠️ Soporte para Variantes e Imágenes
+- **NEW**: Soporte completo para variantes de productos con `item_group_id`
+- **NEW**: Gestión de imágenes con `productCreateMedia` mutation
+- **NEW**: Sistema de opciones de productos: Capacidad y Condición automáticas
+- **IMPROVED**: Detección inteligente de capacidades desde títulos (GB, TB, ML, L)
+
+### 📊 Arquitectura Shopify
+- **CLARIFIED**: Implementación correcta de SKUs solo en variantes (no productos base)
+- **IMPROVED**: Estructura producto base + variantes alineada con estándares Shopify
+- **OPTIMIZED**: Agrupación eficiente por `item_group_id` del XML
+
 ## v1.3.0 - 2025.11.02
 
 ### 🔧 Correcciones Críticas

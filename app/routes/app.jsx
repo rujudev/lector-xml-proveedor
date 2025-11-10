@@ -1,3 +1,4 @@
+import { AppProvider as PolarisAppProvider } from "@shopify/polaris";
 import { AppProvider } from "@shopify/shopify-app-react-router/react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { Outlet, useLoaderData, useRouteError } from "react-router";
@@ -15,12 +16,13 @@ export default function App() {
 
   return (
     <AppProvider embedded apiKey={apiKey}>
-      <s-app-nav>
-        <s-link href="/app">Lector XML</s-link>
-        <s-link href="/app/sync">Sincronización</s-link>
-        <s-link href="/app/additional">Configuración</s-link>
-      </s-app-nav>
-      <Outlet />
+      <PolarisAppProvider i18n={{}}>
+        <s-app-nav>
+          <s-link href="/app">Lector XML</s-link>
+          <s-link href="/app/additional">Configuración</s-link>
+        </s-app-nav>
+        <Outlet />
+      </PolarisAppProvider>
     </AppProvider>
   );
 }

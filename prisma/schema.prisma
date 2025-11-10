@@ -91,3 +91,26 @@ model SyncLog {
   completedAt       DateTime?
   duration          Int?     // Duración en segundos
 }
+
+model SyncProgress {
+  id                String   @id @default(cuid())
+  shop              String   // Shopify store domain
+  syncLogId         String?  // Referencia al SyncLog actual
+  
+  status            String   // 'idle', 'parsing', 'syncing', 'completed', 'error'
+  currentStep       String?  // Descripción del paso actual
+  totalItems        Int      @default(0)
+  processedItems    Int      @default(0)
+  successItems      Int      @default(0)
+  errorItems        Int      @default(0)
+  
+  // Detalles del progreso
+  currentProduct    String?  // Nombre del producto que se está procesando
+  errorMessage      String?
+  
+  startedAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  completedAt       DateTime?
+  
+  @@unique([shop])
+}

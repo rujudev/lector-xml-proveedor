@@ -1,5 +1,5 @@
 // /app/routes/api.sync-cron.jsx
-import { prisma } from "../db.server";
+import { prisma } from "../../db.server";
 
 // Esta ruta será llamada por un cron job externo o scheduler
 export const action = async ({ request }) => {
@@ -38,7 +38,7 @@ export const action = async ({ request }) => {
       try {
         // Necesitamos autenticarnos para cada tienda
         // En un escenario real, necesitarías almacenar y usar tokens de acceso
-        console.log(`Sincronizando proveedor ${provider.name} para tienda ${provider.shop}`);
+        // console.log(`Sincronizando proveedor ${provider.name} para tienda ${provider.shop}`);
         
         // Por ahora, solo registramos que se intentó la sincronización
         await prisma.syncLog.create({

@@ -1,0 +1,8 @@
+2025-11-03T19:02:00.337551Z  INFO tailwindcss_oxide::scanner: Provided sources:
+2025-11-03T19:02:00.337909Z  INFO tailwindcss_oxide::scanner: Source: PublicSourceEntry { base: "/Users/rubenjuanmolina/Documents/Proyectos/secondtech/lector-xml-proveedor", pattern: "**/*", negated: false }
+2025-11-03T19:02:00.338559Z  INFO tailwindcss_oxide::scanner: Optimized sources:
+2025-11-03T19:02:00.338569Z  INFO tailwindcss_oxide::scanner: Source: Auto { base: "/Users/rubenjuanmolina/Documents/Proyectos/secondtech/lector-xml-proveedor" }
+2025-11-03T19:02:03.516643Z  INFO tailwindcss_oxide::scanner: Provided sources:
+2025-11-03T19:02:03.516681Z  INFO tailwindcss_oxide::scanner: Source: PublicSourceEntry { base: "/Users/rubenjuanmolina/Documents/Proyectos/secondtech/lector-xml-proveedor", pattern: "**/*", negated: false }
+2025-11-03T19:02:03.516732Z  INFO tailwindcss_oxide::scanner: Optimized sources:
+2025-11-03T19:02:03.516745Z  INFO tailwindcss_oxide::scanner: Source: Auto { base: "/Users/rubenjuanmolina/Documents/Proyectos/secondtech/lector-xml-proveedor" }

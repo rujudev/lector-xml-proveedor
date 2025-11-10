@@ -1,9 +1,9 @@
 # Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
 
-client_id = "f5cd656caba7027a223753d2be36fb8e"
-name = "lector-xml-proveedor"
 application_url = "https://example.com"
+client_id = "f5cd656caba7027a223753d2be36fb8e"
 embedded = true
+name = "lector-xml-proveedor"
 
 [build]
 automatically_update_urls_on_dev = true
@@ -12,17 +12,17 @@ include_config_on_deploy = true
 [webhooks]
 api_version = "2026-01"
 
-  [[webhooks.subscriptions]]
-  topics = [ "app/uninstalled" ]
-  uri = "/webhooks/app/uninstalled"
+[[webhooks.subscriptions]]
+topics = ["app/uninstalled"]
+uri = "/webhooks/app/uninstalled"
 
-  [[webhooks.subscriptions]]
-  topics = [ "app/scopes_update" ]
-  uri = "/webhooks/app/scopes_update"
+[[webhooks.subscriptions]]
+topics = ["app/scopes_update"]
+uri = "/webhooks/app/scopes_update"
 
 [access_scopes]
 # Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
-scopes = "write_products"
+scopes = "write_products,write_inventory"
 
 [auth]
-redirect_urls = [ "https://example.com/api/auth" ]
+redirect_urls = ["https://example.com/api/auth"]
