@@ -1054,17 +1054,17 @@ async function createShopifyProductWithVariants(admin, variants) {
       log(`⚠️ Error agregando imágenes: ${imagesResult.error}`);
     }
 
-    // Paso 3: Si hay múltiples variantes, crear variantes adicionales
+    // Paso 3: Asignar SKU a la variante por defecto (primera variante)
+    if (createdProduct.variants?.edges?.length > 0) {
+      const defaultVariant = createdProduct.variants.edges[0].node;
+      await updateDefaultVariant(admin, defaultVariant.id, masterProduct, createdProduct.id);
+    }
+
+    // Paso 4: Si hay múltiples variantes, crear variantes adicionales
     if (variants.length > 1) {
       const variantsResult = await createProductVariants(admin, createdProduct, variants);
       if (!variantsResult.success) {
-        log(`⚠️ Error creando variantes, pero producto base creado: ${variantsResult.error}`);
-      }
-    } else {
-      // Paso 3b: Actualizar la variante única con datos específicos
-      if (createdProduct.variants?.edges?.length > 0) {
-        const defaultVariant = createdProduct.variants.edges[0].node;
-        await updateDefaultVariant(admin, defaultVariant.id, masterProduct, createdProduct.id);
+        log(`⚠️ Error creando variantes adicionales, pero producto base creado: ${variantsResult.error}`);
       }
     }
 
@@ -1123,16 +1123,11 @@ async function createProductVariants(admin, product, variants) {
         return null;
       }
 
-      // --- Construir objeto variante ---
+      // --- Construir objeto variante SIN SKU (ProductVariantsBulkInput no lo soporta) ---
       const variantInput = {
         price: parseFloat(variant.price).toFixed(2), // siempre string con decimales
         inventoryPolicy: variant.inventoryPolicy || "CONTINUE",
       };
-
-      // SKU
-      if (variant.sku) {
-        variantInput.sku = sanitize(variant.sku.toString());
-      }
 
       // Barcode (GTIN)
       if (variant.gtin && /^[0-9]{8,}$/.test(variant.gtin.toString())) {
@@ -1146,6 +1141,9 @@ async function createProductVariants(admin, product, variants) {
       if (variant.image_link) {
         variantInput.mediaSrc = [variant.image_link];
       }
+
+      // Guardar el SKU para asignarlo después de la creación
+      variantInput._pendingSku = variant.sku;
 
       return variantInput;
     });
@@ -1182,11 +1180,91 @@ async function createProductVariants(admin, product, variants) {
       log(`✅ ${createdVariants.length} variantes creadas exitosamente`);
     }
 
+    // --- Paso 2: Asignar SKUs individualmente a las variantes creadas ---
+    await assignSkusToVariants(admin, createdVariants, variantsInput);
+
     return { success: true, variants: createdVariants };
     
   } catch (error) {
     log(`💥 Error creando variantes: ${error.message}`);
     return { success: false, error: error.message };
+  }
+}
+
+// Función para asignar SKUs a variantes ya creadas
+async function assignSkusToVariants(admin, createdVariants, variantsInput) {
+  if (!createdVariants || createdVariants.length === 0) {
+    return;
+  }
+
+  if (CONFIG.LOG) {
+    log(`🏷️ Asignando SKUs a ${createdVariants.length} variantes...`);
+  }
+
+  // Crear mutation para actualizar variante individual
+  const VARIANT_UPDATE_INDIVIDUAL = `
+    mutation updateProductVariant($productVariant: ProductVariantUpdateInput!) {
+      productVariantUpdate(productVariant: $productVariant) {
+        productVariant { 
+          id 
+          sku 
+          price 
+        }
+        userErrors { 
+          field 
+          message 
+        }
+      }
+    }
+  `;
+
+  // Recorrer cada variante creada y asignar su SKU correspondiente
+  for (let i = 0; i < createdVariants.length; i++) {
+    const createdVariant = createdVariants[i];
+    const originalVariant = variantsInput[i]; // Mismo orden
+
+    // Verificar si la variante original tiene SKU pendiente
+    if (originalVariant && originalVariant._pendingSku) {
+      try {
+        const updateInput = {
+          id: createdVariant.id,
+          sku: sanitize(originalVariant._pendingSku.toString())
+        };
+
+        if (CONFIG.LOG) {
+          log(`🏷️ Asignando SKU "${updateInput.sku}" a variante ${createdVariant.id}`);
+        }
+
+        const rawResponse = await withRetry(() =>
+          admin.graphql(VARIANT_UPDATE_INDIVIDUAL, {
+            variables: {
+              productVariant: updateInput
+            }
+          })
+        );
+
+        const responseData = await parseGraphQLResponse(rawResponse);
+        
+        const errors = responseData?.data?.productVariantUpdate?.userErrors || [];
+        if (errors.length) {
+          log(`⚠️ Error asignando SKU a variante ${createdVariant.id}:`, errors);
+        } else {
+          if (CONFIG.LOG) {
+            log(`✅ SKU asignado exitosamente a variante ${createdVariant.id}`);
+          }
+        }
+
+        // Pequeña pausa para evitar rate limiting
+        await sleep(50);
+
+      } catch (error) {
+        log(`❌ Error asignando SKU a variante ${createdVariant.id}:`, error.message);
+      }
+    }
+  }
+
+  if (CONFIG.LOG) {
+    log(`🏷️ Proceso de asignación de SKUs completado`);
   }
 }
 
