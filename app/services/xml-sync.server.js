@@ -50,6 +50,333 @@ async function parseGraphQLResponse(response) {
   throw new Error(`Formato de respuesta GraphQL no reconocido: ${typeof response}`);
 }
 
+// Función para buscar productos existentes en Shopify
+async function findExistingProductByGroup(admin, itemGroupId, firstProductSku) {
+  try {
+    // Buscar por múltiples criterios para máxima precisión
+    const searchQueries = [
+      `sku:${itemGroupId}`,                    // Por item_group_id como SKU
+      `barcode:${itemGroupId}`,               // Por item_group_id como barcode
+      `sku:${firstProductSku}`,               // Por SKU del primer producto
+      `barcode:${firstProductSku}`            // Por barcode del primer producto
+    ].filter(Boolean); // Filtrar valores nulos
+
+    for (const searchQuery of searchQueries) {
+      const query = `
+        query searchProducts($query: String!) {
+          products(first: 5, query: $query) {
+            edges {
+              node {
+                id
+                title
+                handle
+                variants(first: 50) {
+                  edges {
+                    node {
+                      id
+                      sku
+                      barcode
+                      price
+                      inventoryQuantity
+                    }
+                  }
+                }
+                images(first: 10) {
+                  edges {
+                    node {
+                      id
+                      url
+                      altText
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      `;
+
+      const response = await admin.graphql(query, {
+        variables: { query: searchQuery }
+      });
+
+      const result = await parseGraphQLResponse(response);
+      
+      if (result.data?.products?.edges?.length > 0) {
+        const product = result.data.products.edges[0].node;
+        log(`✅ Producto existente encontrado: ${product.title} (${product.id})`);
+        return product;
+      }
+    }
+
+    return null; // No encontrado
+  } catch (error) {
+    log(`❌ Error buscando producto existente:`, error);
+    return null;
+  }
+}
+
+// Función para actualizar producto existente
+async function updateExistingProduct(admin, existingProduct, newVariants, sendProgressEvent) {
+  try {
+    log(`🔄 Actualizando producto existente: ${existingProduct.title}`);
+    
+    const baseVariant = newVariants[0];
+    const productId = existingProduct.id;
+    let updatedVariantsCount = 0;
+    let createdVariantsCount = 0;
+
+    // 1. Actualizar información base del producto
+    await updateProductDetails(admin, productId, baseVariant, sendProgressEvent);
+
+    // 2. Procesar cada variante del XML
+    for (const newVariant of newVariants) {
+      const existingVariant = findMatchingVariant(existingProduct.variants.edges, newVariant);
+      
+      if (existingVariant) {
+        // Actualizar variante existente
+        await updateExistingVariant(admin, existingVariant.node.id, newVariant, sendProgressEvent);
+        updatedVariantsCount++;
+      } else {
+        // Agregar nueva variante al producto existente
+        await addVariantToProduct(admin, productId, newVariant, sendProgressEvent);
+        createdVariantsCount++;
+      }
+    }
+
+    // 3. Procesar imágenes si hay nuevas
+    await updateProductImages(admin, productId, newVariants);
+
+    log(`✅ Producto actualizado: ${updatedVariantsCount} variantes actualizadas, ${createdVariantsCount} variantes nuevas`);
+    
+    return {
+      productId,
+      action: 'updated',
+      variantsUpdated: updatedVariantsCount,
+      variantsCreated: createdVariantsCount
+    };
+
+  } catch (error) {
+    log(`❌ Error actualizando producto existente:`, error);
+    throw error;
+  }
+}
+
+// Función auxiliar para encontrar variante coincidente
+function findMatchingVariant(existingVariants, newVariant) {
+  return existingVariants.find(edge => {
+    const existing = edge.node;
+    
+    // Buscar por SKU (más confiable)
+    if (existing.sku && newVariant.sku && existing.sku === newVariant.sku) {
+      return true;
+    }
+    
+    // Buscar por barcode/GTIN
+    if (existing.barcode && newVariant.gtin && existing.barcode === newVariant.gtin.toString()) {
+      return true;
+    }
+    
+    return false;
+  });
+}
+
+// Función para actualizar detalles base del producto
+async function updateProductDetails(admin, productId, baseVariant, sendProgressEvent) {
+  const updateMutation = `
+    mutation updateProduct($product: ProductUpdateInput!) {
+      productUpdate(product: $product) {
+        product { 
+          id 
+          title 
+        }
+        userErrors { 
+          field 
+          message 
+        }
+      }
+    }
+  `;
+
+  const productInput = {
+    id: productId,
+    title: baseVariant.title,
+    bodyHtml: baseVariant.description,
+    vendor: baseVariant.brand,
+    tags: baseVariant.tags
+  };
+
+  const response = await admin.graphql(updateMutation, {
+    variables: { product: productInput }
+  });
+
+  const result = await parseGraphQLResponse(response);
+  
+  if (result.data?.productUpdate?.userErrors?.length > 0) {
+    throw new Error(`Error actualizando producto: ${JSON.stringify(result.data.productUpdate.userErrors)}`);
+  }
+
+  if (sendProgressEvent) {
+    await sendProgressEvent('updated', `Actualizado producto: ${baseVariant.title}`);
+  }
+}
+
+// Función para actualizar variante existente
+async function updateExistingVariant(admin, variantId, newVariant, sendProgressEvent) {
+  const updateMutation = `
+    mutation updateProductVariant($productVariant: ProductVariantUpdateInput!) {
+      productVariantUpdate(productVariant: $productVariant) {
+        productVariant { 
+          id 
+          sku 
+          price 
+        }
+        userErrors { 
+          field 
+          message 
+        }
+      }
+    }
+  `;
+
+  const variantInput = {
+    id: variantId,
+    price: parseFloat(newVariant.price).toFixed(2),
+    sku: newVariant.sku,
+    inventoryPolicy: "CONTINUE"
+  };
+
+  // Agregar barcode si está disponible
+  if (newVariant.gtin && /^[0-9]{8,}$/.test(newVariant.gtin.toString())) {
+    variantInput.barcode = newVariant.gtin.toString();
+  }
+
+  const response = await admin.graphql(updateMutation, {
+    variables: { productVariant: variantInput }
+  });
+
+  const result = await parseGraphQLResponse(response);
+  
+  if (result.data?.productVariantUpdate?.userErrors?.length > 0) {
+    log(`⚠️ Error actualizando variante: ${JSON.stringify(result.data.productVariantUpdate.userErrors)}`);
+  }
+
+  if (sendProgressEvent) {
+    await sendProgressEvent('updated', `Actualizada variante: ${newVariant.sku}`);
+  }
+}
+
+// Función para agregar nueva variante a producto existente
+async function addVariantToProduct(admin, productId, newVariant, sendProgressEvent) {
+  const createMutation = `
+    mutation createProductVariant($productVariant: ProductVariantCreateInput!) {
+      productVariantCreate(productVariant: $productVariant) {
+        productVariant { 
+          id 
+          sku 
+          price 
+        }
+        userErrors { 
+          field 
+          message 
+        }
+      }
+    }
+  `;
+
+  // Generar opciones para la nueva variante
+  const sizeMatch = newVariant.title?.match(/(\d+(?:GB|TB|ML|L))/i);
+  const capacityValue = sizeMatch ? sizeMatch[1] : "Estándar";
+  
+  const CONDITIONS = {
+    "new": "Nuevo",
+    "refurbished": "Reacondicionado", 
+    "used": "Usado"
+  };
+  const conditionValue = CONDITIONS[newVariant.condition] || "Nuevo";
+
+  const variantInput = {
+    productId: productId,
+    price: parseFloat(newVariant.price).toFixed(2),
+    sku: newVariant.sku,
+    inventoryPolicy: "CONTINUE",
+    optionValues: [
+      { optionName: "Capacidad", name: capacityValue },
+      { optionName: "Condición", name: conditionValue }
+    ]
+  };
+
+  // Agregar barcode si está disponible  
+  if (newVariant.gtin && /^[0-9]{8,}$/.test(newVariant.gtin.toString())) {
+    variantInput.barcode = newVariant.gtin.toString();
+  }
+
+  const response = await admin.graphql(createMutation, {
+    variables: { productVariant: variantInput }
+  });
+
+  const result = await parseGraphQLResponse(response);
+  
+  if (result.data?.productVariantCreate?.userErrors?.length > 0) {
+    log(`⚠️ Error creando nueva variante: ${JSON.stringify(result.data.productVariantCreate.userErrors)}`);
+  }
+
+  if (sendProgressEvent) {
+    await sendProgressEvent('created', `Nueva variante: ${newVariant.sku}`);
+  }
+}
+
+// Función para actualizar imágenes del producto
+async function updateProductImages(admin, productId, variants) {
+  // Obtener imágenes únicas de todas las variantes
+  const imageUrls = [...new Set(
+    variants
+      .map(v => v.image_link)
+      .filter(Boolean)
+  )];
+
+  if (imageUrls.length === 0) return;
+
+  for (const imageUrl of imageUrls) {
+    try {
+      const mediaMutation = `
+        mutation createMedia($media: [CreateMediaInput!]!, $productId: ID!) {
+          productCreateMedia(media: $media, productId: $productId) {
+            media {
+              id
+              status
+            }
+            mediaUserErrors {
+              field
+              message
+            }
+          }
+        }
+      `;
+
+      const response = await admin.graphql(mediaMutation, {
+        variables: {
+          productId: productId,
+          media: [{
+            originalSource: imageUrl,
+            mediaContentType: "IMAGE"
+          }]
+        }
+      });
+
+      const result = await parseGraphQLResponse(response);
+      
+      if (result.data?.productCreateMedia?.mediaUserErrors?.length > 0) {
+        log(`⚠️ Error agregando imagen: ${JSON.stringify(result.data.productCreateMedia.mediaUserErrors)}`);
+      }
+      
+      await sleep(100); // Rate limiting
+    } catch (error) {
+      log(`⚠️ Error procesando imagen ${imageUrl}:`, error);
+    }
+  }
+}
+
 async function withRetry(fn, retries = CONFIG.RETRY_COUNT) {
   let attempt = 0;
   while (attempt < retries) {
@@ -1148,15 +1475,17 @@ async function processVariantGroup(admin, groupId, variants, cache, shop, global
       });
     }
     
-    // Buscar si el producto ya existe (usar producto maestro para búsqueda)
-    const existing = await findExistingProduct(admin, masterProduct, cache);
+    // Buscar si el producto ya existe usando item_group_id
+    const firstVariantSku = variants[0].sku;
+    const existing = await findExistingProductByGroup(admin, groupId, firstVariantSku);
     
     let result;
     if (existing) {
-      // Actualizar producto existente
-      result = await updateShopifyProduct(admin, existing, masterProduct);
-      if (result.success) {
-        
+      // Actualizar producto existente con nuevas variantes
+      const sendProgressFn = shop ? (type, message) => sendProgressEvent(shop, { type, message }) : null;
+      result = await updateExistingProduct(admin, existing, variants, sendProgressFn);
+      
+      if (result) {
         // Enviar evento de actualización
         if (shop) {
           await sendProgressEvent(shop, {
@@ -1165,11 +1494,24 @@ async function processVariantGroup(admin, groupId, variants, cache, shop, global
             productId: existing.id,
             processed: globalStats.processed + 1,
             total: globalStats.total,
-            variants: isVariantGroup ? variants.length : 1
+            variants: variants.length,
+            variantsUpdated: result.variantsUpdated || 0,
+            variantsCreated: result.variantsCreated || 0
           });
         }
         
-        return { success: true, action: 'updated', variants: isVariantGroup ? variants.length : 1 };
+        // Actualizar estadísticas
+        globalStats.updated++;
+        globalStats.variantsUpdated += result.variantsUpdated || 0;
+        globalStats.variantsCreated += result.variantsCreated || 0;
+        
+        return { 
+          success: true, 
+          action: 'updated', 
+          variants: variants.length,
+          variantsUpdated: result.variantsUpdated || 0,
+          variantsCreated: result.variantsCreated || 0
+        };
       }
     } else {
       // Crear nuevo producto
@@ -1191,6 +1533,10 @@ async function processVariantGroup(admin, groupId, variants, cache, shop, global
             });
           }
           
+          // Actualizar estadísticas
+          globalStats.created++;
+          globalStats.variantsCreated += variants.length;
+          
           return { success: true, action: 'created', variants: variants.length };
         }
       } else {
@@ -1209,6 +1555,10 @@ async function processVariantGroup(admin, groupId, variants, cache, shop, global
               variants: 1
             });
           }
+          
+          // Actualizar estadísticas
+          globalStats.created++;
+          globalStats.variantsCreated += 1;
           
           return { success: true, action: 'created', variants: 1 };
         }
@@ -1459,7 +1809,15 @@ export async function processProductsParallel(admin, products, shop) {
   }
 
   // Estadísticas globales compartidas para eventos
-  const globalStats = { processed: 0, total: variantGroups.size };
+  const globalStats = { 
+    processed: 0, 
+    total: variantGroups.size,
+    created: 0,
+    updated: 0,
+    variantsCreated: 0,
+    variantsUpdated: 0,
+    errors: 0
+  };
 
   // Procesar en lotes paralelos
   for (let i = 0; i < groupEntries.length; i += CONFIG.PARALLEL_BATCH_SIZE) {
@@ -1513,9 +1871,15 @@ export async function processProductsParallel(admin, products, shop) {
     }
   }
 
-  // Estadísticas finales
+  // Estadísticas finales combinando datos de stats y globalStats
   const finalStats = {
-    ...stats,
+    created: globalStats.created || 0,
+    updated: globalStats.updated || 0,
+    errors: globalStats.errors || stats.errors || 0,
+    processed: globalStats.processed || stats.processed || 0,
+    variants: globalStats.variantsCreated + globalStats.variantsUpdated || stats.variants || 0,
+    variantsCreated: globalStats.variantsCreated || 0,
+    variantsUpdated: globalStats.variantsUpdated || 0,
     totalVariantGroups: variantGroups.size,
     totalProducts: products.length,
     processingMode: 'parallel',
