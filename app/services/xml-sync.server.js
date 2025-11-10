@@ -230,12 +230,14 @@ async function updateExistingProduct(admin, existingProduct, newVariants, sendPr
     });
 
     // Usar productSet para actualizar producto completo con todas las variantes
+    const productOptions = createProductOptions(newVariants);
     const productSetInput = {
       id: productId,
       title: baseVariant.title,
       bodyHtml: baseVariant.description,
       vendor: baseVariant.brand,
       tags: baseVariant.tags,
+      productOptions: productOptions,
       variants: variantsToUpdate
     };
 
@@ -1178,8 +1180,10 @@ async function createProductVariants(admin, product, variants) {
     }));
 
     // --- Paso 3: Preparar el input para productSet usando mediaId ---
+    const productOptions = createProductOptions(variants);
     const productSetInput = {
       id: product.id,
+      productOptions: productOptions,
       variants: allVariants.map(variant => ({
         price: variant.price,
         inventoryPolicy: variant.inventoryPolicy,
@@ -1425,8 +1429,10 @@ async function updateDefaultVariant(admin, variantId, p, productId = null) {
     }
     
     // Usar productSet para actualizar la variante
+    const productOptions = createProductOptions([p]);
     const productSetInput = {
       id: actualProductId,
+      productOptions: productOptions,
       variants: [variantInput]
     };
     
