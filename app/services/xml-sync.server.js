@@ -1173,9 +1173,18 @@ async function createProductVariants(admin, product, variants) {
       // Opciones (siempre incluir al menos Capacidad y Condición)
       variantInput.optionValues = optionValues;
 
-      // Imagen como array
+      // Imagen con estructura CreateMediaInput
       if (variant.image_link) {
-        variantInput.mediaSrc = [variant.image_link];
+        try {
+          new URL(variant.image_link);
+          variantInput.media = [{
+            originalSource: variant.image_link,
+            alt: `${variant.title} - ${variant.color || 'Imagen del producto'}`.slice(0, 120),
+            mediaContentType: "IMAGE"
+          }];
+        } catch (error) {
+          log(`⚠️ URL de imagen inválida ignorada para variante: ${variant.image_link}`);
+        }
       }
 
       // Guardar el SKU para asignarlo después de la creación
@@ -1221,7 +1230,16 @@ async function createProductVariants(admin, product, variants) {
     }
     
     if (masterVariant.image_link) {
-      masterVariantInput.mediaSrc = [masterVariant.image_link];
+      try {
+        new URL(masterVariant.image_link);
+        masterVariantInput.media = [{
+          originalSource: masterVariant.image_link,
+          alt: `${masterVariant.title} - ${masterVariant.color || 'Imagen del producto'}`.slice(0, 120),
+          mediaContentType: "IMAGE"
+        }];
+      } catch (error) {
+        log(`⚠️ URL de imagen inválida ignorada para variante principal: ${masterVariant.image_link}`);
+      }
     }
     
     allVariants.push(masterVariantInput);
@@ -1233,7 +1251,7 @@ async function createProductVariants(admin, product, variants) {
       sku: variant._pendingSku ? sanitize(variant._pendingSku.toString()) : undefined,
       barcode: variant.barcode,
       optionValues: variant.optionValues,
-      mediaSrc: variant.mediaSrc
+      media: variant.media
     })));
 
     // Preparar el input para productSet usando ProductVariantSetInput
@@ -1245,7 +1263,7 @@ async function createProductVariants(admin, product, variants) {
         sku: variant.sku,
         barcode: variant.barcode,
         optionValues: variant.optionValues,
-        mediaSrc: variant.mediaSrc
+        media: variant.media
       }))
     };
 
