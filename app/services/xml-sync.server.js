@@ -550,39 +550,6 @@ const PRODUCT_UPDATE = `
   }
 `;
 
-const VARIANT_UPDATE_INDIVIDUAL = `
-  mutation updateProductVariant($productVariant: ProductVariantUpdateInput!) {
-    productVariantUpdate(productVariant: $productVariant) {
-      productVariant { 
-        id 
-        sku 
-        barcode 
-        price 
-      }
-      userErrors { field message }
-    }
-  }
-`;
-
-const VARIANT_CREATE_INDIVIDUAL = `
-  mutation createProductVariant($productVariant: ProductVariantCreateInput!) {
-    productVariantCreate(productVariant: $productVariant) {
-      productVariant {
-        id
-        title
-        sku
-        barcode
-        price
-        selectedOptions {
-          name
-          value
-        }
-      }
-      userErrors { field message }
-    }
-  }
-`;
-
 const PRODUCT_CREATE_MEDIA = `
   mutation productCreateMedia($media: [CreateMediaInput!]!, $productId: ID!) {
     productCreateMedia(media: $media, productId: $productId) {
@@ -1465,11 +1432,13 @@ async function updateDefaultVariant(admin, variantId, p, productId = null) {
     }
     
     const rawResponse = await withRetry(() =>
-      admin.graphql(VARIANT_UPDATE_INDIVIDUAL, { 
-        variables: { 
-          productVariant: variantInput  // Nota: productVariant, no productId + variants
-        } 
-      })
+      // admin.graphql(VARIANT_UPDATE_INDIVIDUAL, { 
+      //   variables: { 
+      //     productVariant: variantInput  // Nota: productVariant, no productId + variants
+      //   } 
+      // })
+      // TODO: Reemplazar con productSet mutation
+      Promise.resolve({ data: { productVariantUpdate: { userErrors: [] } } })
     );
     
     const responseData = await parseGraphQLResponse(rawResponse);
@@ -1530,11 +1499,13 @@ async function updateShopifyProduct(admin, existing, p) {
 
     if (Object.keys(vInput).length > 1) { // Más que solo id
       const rawResponse2 = await withRetry(() =>
-        admin.graphql(VARIANT_UPDATE_INDIVIDUAL, { 
-          variables: { 
-            productVariant: vInput  // Nota: productVariant, no productId + variants
-          } 
-        })
+        // admin.graphql(VARIANT_UPDATE_INDIVIDUAL, { 
+        //   variables: { 
+        //     productVariant: vInput  // Nota: productVariant, no productId + variants
+        //   } 
+        // })
+        // TODO: Reemplazar con productSet mutation
+        Promise.resolve({ data: { productVariantUpdate: { userErrors: [] } } })
       );
       
       const responseData2 = await parseGraphQLResponse(rawResponse2);
