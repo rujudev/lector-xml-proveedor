@@ -136,7 +136,7 @@ async function updateExistingProduct(admin, existingProduct, newVariants, sendPr
       // Preparar input de variante usando estructura ProductVariantSetInput
       const variantInput = {
         price: parseFloat(newVariant.price).toFixed(2),
-        sku: newVariant.sku,
+        sku: newVariant.sku ? newVariant.sku.toString() : undefined,
         inventoryPolicy: "CONTINUE"
       };
 
@@ -1183,7 +1183,7 @@ async function createProductVariants(admin, product, variants) {
       variants: allVariants.map(variant => ({
         price: variant.price,
         inventoryPolicy: variant.inventoryPolicy,
-        sku: variant.sku,
+        sku: variant.sku.toString(),
         barcode: variant.barcode,
         optionValues: variant.optionValues,
         ...(variant.mediaId && { mediaId: variant.mediaId }) // Solo incluir si existe
@@ -1346,7 +1346,7 @@ async function updateDefaultVariant(admin, variantId, p, productId = null) {
     const variantInput = {
       id: variantId,
       price: parseFloat(p.price).toString(),
-      sku: sku,
+      sku: sku ? sku.toString() : undefined,
       inventoryPolicy: "DENY"
     };
     
@@ -1477,10 +1477,10 @@ async function updateShopifyProduct(admin, existing, p) {
       variantInput.price = p.price.toString();
     }
     if (p.sku && p.sku !== variant.sku) {
-      variantInput.sku = p.sku;
+      variantInput.sku = p.sku.toString();
     }
     if (p.gtin && p.gtin !== variant.barcode) {
-      variantInput.barcode = p.gtin;
+      variantInput.barcode = p.gtin.toString();
     }
 
     // Crear imagen si existe y obtener mediaId
