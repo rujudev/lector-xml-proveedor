@@ -173,22 +173,61 @@ async function updateExistingProduct(admin, existingProduct, newVariants, sendPr
         variantInput.barcode = newVariant.gtin.toString();
       }
 
-      // Agregar imagen si existe
-      if (newVariant.image_link) {
-        try {
-          new URL(newVariant.image_link);
-          variantInput.media = [{
-            originalSource: newVariant.image_link,
-            alt: `${newVariant.title} - ${newVariant.color || 'Imagen del producto'}`.slice(0, 120),
-            mediaContentType: "IMAGE"
-          }];
-        } catch (error) {
-          log(`⚠️ URL de imagen inválida ignorada: ${newVariant.image_link}`);
-        }
-      }
-
       variantsToUpdate.push(variantInput);
     }
+
+    // --- Crear medios primero para todas las imágenes ---
+    const mediaIdMap = new Map();
+    const allImageUrls = new Set();
+    
+    // Recolectar URLs únicas
+    newVariants.forEach(variant => {
+      if (variant.image_link) {
+        allImageUrls.add(variant.image_link);
+      }
+    });
+    
+    // Crear medios
+    for (const imageUrl of allImageUrls) {
+      try {
+        new URL(imageUrl);
+        
+        const mediaResponse = await withRetry(() =>
+          admin.graphql(PRODUCT_CREATE_MEDIA, {
+            variables: {
+              productId: productId,
+              media: [{
+                originalSource: imageUrl,
+                alt: `Imagen del producto - ${imageUrl.split('/').pop()}`.slice(0, 120),
+                mediaContentType: "IMAGE"
+              }]
+            }
+          })
+        );
+        
+        const mediaData = await parseGraphQLResponse(mediaResponse);
+        const mediaErrors = mediaData?.data?.productCreateMedia?.mediaUserErrors || [];
+        
+        if (mediaErrors.length === 0) {
+          const createdMedia = mediaData?.data?.productCreateMedia?.media?.[0];
+          if (createdMedia?.id) {
+            mediaIdMap.set(imageUrl, createdMedia.id);
+          }
+        }
+      } catch (error) {
+        log(`⚠️ Error creando media: ${error.message}`);
+      }
+    }
+
+    // --- Asignar mediaId a las variantes que tienen imágenes ---
+    variantsToUpdate.forEach(variant => {
+      const correspondingNewVariant = newVariants.find(nv => nv.sku === variant.sku);
+      if (correspondingNewVariant?.image_link && mediaIdMap.has(correspondingNewVariant.image_link)) {
+        variant.mediaId = mediaIdMap.get(correspondingNewVariant.image_link);
+        // Eliminar media si existe (ya no se necesita)
+        delete variant.media;
+      }
+    });
 
     // Usar productSet para actualizar producto completo con todas las variantes
     const productSetInput = {
@@ -1033,10 +1072,62 @@ async function createProductVariants(admin, product, variants) {
       log(`🎯 Creando ${variantsInput.length} variantes adicionales`);
     }
 
-    // --- Ejecutar Set de Variantes (incluye la variante por defecto + nuevas) ---
-    const allVariants = [];
+    // --- Paso 1: Crear medios (imágenes) primero ---
     const masterVariant = variants[0]; // Primer elemento como variante principal
+    const allVariants = [];
+    const mediaIdMap = new Map(); // Para mapear URLs de imagen a IDs de media
+    const allImageUrls = new Set();
     
+    // Recolectar todas las URLs únicas de imágenes de todas las variantes
+    [masterVariant, ...variantsInput.filter(v => v)].forEach(variant => {
+      const imageUrl = variant.image_link || variant._originalImageUrl;
+      if (imageUrl) {
+        allImageUrls.add(imageUrl);
+        // Guardar la URL original en las variantes procesadas para referencia
+        if (variant._pendingSku) {
+          variant._originalImageUrl = imageUrl;
+        }
+      }
+    });
+    
+    // Crear medios para todas las imágenes únicas
+    for (const imageUrl of allImageUrls) {
+      try {
+        new URL(imageUrl); // Validar URL
+        
+        const mediaResponse = await withRetry(() =>
+          admin.graphql(PRODUCT_CREATE_MEDIA, {
+            variables: {
+              productId: product.id,
+              media: [{
+                originalSource: imageUrl,
+                alt: `Imagen del producto - ${imageUrl.split('/').pop()}`.slice(0, 120),
+                mediaContentType: "IMAGE"
+              }]
+            }
+          })
+        );
+        
+        const mediaData = await parseGraphQLResponse(mediaResponse);
+        const mediaErrors = mediaData?.data?.productCreateMedia?.mediaUserErrors || [];
+        
+        if (mediaErrors.length === 0) {
+          const createdMedia = mediaData?.data?.productCreateMedia?.media?.[0];
+          if (createdMedia?.id) {
+            mediaIdMap.set(imageUrl, createdMedia.id);
+            if (CONFIG.LOG) {
+              log(`✅ Media creado: ${createdMedia.id} para ${imageUrl}`);
+            }
+          }
+        } else {
+          log(`❌ Error creando media para ${imageUrl}:`, mediaErrors);
+        }
+      } catch (error) {
+        log(`⚠️ URL de imagen inválida ignorada: ${imageUrl}`);
+      }
+    }
+
+    // --- Paso 2: Preparar variantes con mediaId ---
     // Incluir variante por defecto con datos completos
     const masterVariantInput = {
       price: parseFloat(masterVariant.price).toFixed(2),
@@ -1061,32 +1152,32 @@ async function createProductVariants(admin, product, variants) {
       masterVariantInput.optionValues.push({ optionName: "Color", name: masterVariant.color });
     }
     
-    if (masterVariant.image_link) {
-      try {
-        new URL(masterVariant.image_link);
-        masterVariantInput.media = [{
-          originalSource: masterVariant.image_link,
-          alt: `${masterVariant.title} - ${masterVariant.color || 'Imagen del producto'}`.slice(0, 120),
-          mediaContentType: "IMAGE"
-        }];
-      } catch (error) {
-        log(`⚠️ URL de imagen inválida ignorada para variante principal: ${masterVariant.image_link}`);
-      }
+    // Asignar mediaId si existe imagen para la variante principal
+    if (masterVariant.image_link && mediaIdMap.has(masterVariant.image_link)) {
+      masterVariantInput.mediaId = mediaIdMap.get(masterVariant.image_link);
     }
     
     allVariants.push(masterVariantInput);
     
-    // Agregar variantes adicionales (omitir la primera que ya incluimos)
-    allVariants.push(...variantsInput.map(variant => ({
-      price: variant.price,
-      inventoryPolicy: variant.inventoryPolicy,
-      sku: variant._pendingSku ? sanitize(variant._pendingSku.toString()) : undefined,
-      barcode: variant.barcode,
-      optionValues: variant.optionValues,
-      media: variant.media
-    })));
+    // Agregar variantes adicionales con mediaId
+    allVariants.push(...variantsInput.filter(v => v).map(variant => {
+      const variantData = {
+        price: variant.price,
+        inventoryPolicy: variant.inventoryPolicy,
+        sku: variant._pendingSku ? sanitize(variant._pendingSku.toString()) : undefined,
+        barcode: variant.barcode,
+        optionValues: variant.optionValues
+      };
+      
+      // Asignar mediaId si existe imagen para esta variante
+      if (variant._originalImageUrl && mediaIdMap.has(variant._originalImageUrl)) {
+        variantData.mediaId = mediaIdMap.get(variant._originalImageUrl);
+      }
+      
+      return variantData;
+    }));
 
-    // Preparar el input para productSet usando ProductVariantSetInput
+    // --- Paso 3: Preparar el input para productSet usando mediaId ---
     const productSetInput = {
       id: product.id,
       variants: allVariants.map(variant => ({
@@ -1095,7 +1186,7 @@ async function createProductVariants(admin, product, variants) {
         sku: variant.sku,
         barcode: variant.barcode,
         optionValues: variant.optionValues,
-        media: variant.media
+        ...(variant.mediaId && { mediaId: variant.mediaId }) // Solo incluir si existe
       }))
     };
 
@@ -1291,15 +1382,39 @@ async function updateDefaultVariant(admin, variantId, p, productId = null) {
     // Incluir opciones en la variante
     variantInput.optionValues = optionValues;
     
-    // Imagen si existe
+    // Crear imagen si existe y obtener mediaId
     if (p.image_link) {
       try {
         new URL(p.image_link);
-        variantInput.media = [{
-          originalSource: p.image_link,
-          alt: `${p.title} - ${p.color || 'Imagen del producto'}`.slice(0, 120),
-          mediaContentType: "IMAGE"
-        }];
+        
+        // Crear media primero
+        const mediaResponse = await withRetry(() =>
+          admin.graphql(PRODUCT_CREATE_MEDIA, {
+            variables: {
+              productId: actualProductId,
+              media: [{
+                originalSource: p.image_link,
+                alt: `${p.title} - ${p.color || 'Imagen del producto'}`.slice(0, 120),
+                mediaContentType: "IMAGE"
+              }]
+            }
+          })
+        );
+        
+        const mediaData = await parseGraphQLResponse(mediaResponse);
+        const mediaErrors = mediaData?.data?.productCreateMedia?.mediaUserErrors || [];
+        
+        if (mediaErrors.length === 0) {
+          const createdMedia = mediaData?.data?.productCreateMedia?.media?.[0];
+          if (createdMedia?.id) {
+            variantInput.mediaId = createdMedia.id;
+            if (CONFIG.LOG) {
+              log(`✅ Media creado para variante: ${createdMedia.id}`);
+            }
+          }
+        } else {
+          log(`❌ Error creando media para variante:`, mediaErrors);
+        }
       } catch (error) {
         log(`⚠️ URL de imagen inválida ignorada: ${p.image_link}`);
       }
@@ -1368,15 +1483,36 @@ async function updateShopifyProduct(admin, existing, p) {
       variantInput.barcode = p.gtin;
     }
 
-    // Agregar imagen si existe
+    // Crear imagen si existe y obtener mediaId
     if (p.image_link) {
       try {
         new URL(p.image_link);
-        variantInput.media = [{
-          originalSource: p.image_link,
-          alt: `${p.title} - Imagen del producto`.slice(0, 120),
-          mediaContentType: "IMAGE"
-        }];
+        
+        // Crear media primero
+        const mediaResponse = await withRetry(() =>
+          admin.graphql(PRODUCT_CREATE_MEDIA, {
+            variables: {
+              productId: existing.id,
+              media: [{
+                originalSource: p.image_link,
+                alt: `${p.title} - Imagen del producto`.slice(0, 120),
+                mediaContentType: "IMAGE"
+              }]
+            }
+          })
+        );
+        
+        const mediaData = await parseGraphQLResponse(mediaResponse);
+        const mediaErrors = mediaData?.data?.productCreateMedia?.mediaUserErrors || [];
+        
+        if (mediaErrors.length === 0) {
+          const createdMedia = mediaData?.data?.productCreateMedia?.media?.[0];
+          if (createdMedia?.id) {
+            variantInput.mediaId = createdMedia.id;
+          }
+        } else {
+          log(`❌ Error creando media:`, mediaErrors);
+        }
       } catch (error) {
         log(`⚠️ URL de imagen inválida ignorada: ${p.image_link}`);
       }
