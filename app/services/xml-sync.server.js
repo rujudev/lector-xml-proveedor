@@ -123,31 +123,101 @@ async function updateExistingProduct(admin, existingProduct, newVariants, sendPr
     
     const baseVariant = newVariants[0];
     const productId = existingProduct.id;
+    
+    // Preparar variantes para productSet
+    const variantsToUpdate = [];
     let updatedVariantsCount = 0;
     let createdVariantsCount = 0;
 
-    // 1. Actualizar información base del producto
-    await updateProductDetails(admin, productId, baseVariant, sendProgressEvent);
-
-    // 2. Procesar cada variante del XML
+    // Procesar cada variante del XML
     for (const newVariant of newVariants) {
       const existingVariant = findMatchingVariant(existingProduct.variants.edges, newVariant);
       
+      // Preparar input de variante usando estructura ProductVariantSetInput
+      const variantInput = {
+        price: parseFloat(newVariant.price).toFixed(2),
+        sku: newVariant.sku,
+        inventoryPolicy: "CONTINUE"
+      };
+
+      // Si es una variante existente, incluir ID para actualización
       if (existingVariant) {
-        // Actualizar variante existente
-        await updateExistingVariant(admin, existingVariant.node.id, newVariant, sendProgressEvent);
+        variantInput.id = existingVariant.node.id;
         updatedVariantsCount++;
       } else {
-        // Agregar nueva variante al producto existente
-        await addVariantToProduct(admin, productId, newVariant, sendProgressEvent);
+        // Nueva variante - generar opciones
+        const sizeMatch = newVariant.title?.match(/(\d+(?:GB|TB|ML|L))/i);
+        const capacityValue = sizeMatch ? sizeMatch[1] : "Estándar";
+        
+        const CONDITIONS = {
+          "new": "Nuevo",
+          "refurbished": "Reacondicionado", 
+          "used": "Usado"
+        };
+        const conditionValue = CONDITIONS[newVariant.condition] || "Nuevo";
+
+        variantInput.optionValues = [
+          { optionName: "Capacidad", name: capacityValue },
+          { optionName: "Condición", name: conditionValue }
+        ];
+        
+        if (newVariant.color) {
+          variantInput.optionValues.push({ optionName: "Color", name: newVariant.color });
+        }
+        
         createdVariantsCount++;
       }
+
+      // Agregar barcode si está disponible  
+      if (newVariant.gtin && /^[0-9]{8,}$/.test(newVariant.gtin.toString())) {
+        variantInput.barcode = newVariant.gtin.toString();
+      }
+
+      // Agregar imagen si existe
+      if (newVariant.image_link) {
+        try {
+          new URL(newVariant.image_link);
+          variantInput.media = [{
+            originalSource: newVariant.image_link,
+            alt: `${newVariant.title} - ${newVariant.color || 'Imagen del producto'}`.slice(0, 120),
+            mediaContentType: "IMAGE"
+          }];
+        } catch (error) {
+          log(`⚠️ URL de imagen inválida ignorada: ${newVariant.image_link}`);
+        }
+      }
+
+      variantsToUpdate.push(variantInput);
     }
 
-    // 3. Procesar imágenes si hay nuevas
-    await updateProductImages(admin, productId, newVariants);
+    // Usar productSet para actualizar producto completo con todas las variantes
+    const productSetInput = {
+      id: productId,
+      title: baseVariant.title,
+      bodyHtml: baseVariant.description,
+      vendor: baseVariant.brand,
+      tags: baseVariant.tags,
+      variants: variantsToUpdate
+    };
+
+    const response = await withRetry(() => 
+      admin.graphql(PRODUCT_SET, {
+        variables: { input: productSetInput }
+      })
+    );
+
+    const result = await parseGraphQLResponse(response);
+    
+    if (result.data?.productSet?.userErrors?.length > 0) {
+      log(`❌ Error actualizando producto con productSet:`, result.data.productSet.userErrors);
+      throw new Error(`Error actualizando producto: ${JSON.stringify(result.data.productSet.userErrors)}`);
+    }
 
     log(`✅ Producto actualizado: ${updatedVariantsCount} variantes actualizadas, ${createdVariantsCount} variantes nuevas`);
+    
+    if (sendProgressEvent) {
+      await sendProgressEvent('updated', `Actualizado producto: ${baseVariant.title}`);
+    }
     
     return {
       productId,
@@ -179,202 +249,6 @@ function findMatchingVariant(existingVariants, newVariant) {
     
     return false;
   });
-}
-
-// Función para actualizar detalles base del producto
-async function updateProductDetails(admin, productId, baseVariant, sendProgressEvent) {
-  const updateMutation = `
-    mutation updateProduct($product: ProductUpdateInput!) {
-      productUpdate(product: $product) {
-        product { 
-          id 
-          title 
-        }
-        userErrors { 
-          field 
-          message 
-        }
-      }
-    }
-  `;
-
-  const productInput = {
-    id: productId,
-    title: baseVariant.title,
-    bodyHtml: baseVariant.description,
-    vendor: baseVariant.brand,
-    tags: baseVariant.tags
-  };
-
-  const response = await admin.graphql(updateMutation, {
-    variables: { product: productInput }
-  });
-
-  const result = await parseGraphQLResponse(response);
-  
-  if (result.data?.productUpdate?.userErrors?.length > 0) {
-    throw new Error(`Error actualizando producto: ${JSON.stringify(result.data.productUpdate.userErrors)}`);
-  }
-
-  if (sendProgressEvent) {
-    await sendProgressEvent('updated', `Actualizado producto: ${baseVariant.title}`);
-  }
-}
-
-// Función para actualizar variante existente
-async function updateExistingVariant(admin, variantId, newVariant, sendProgressEvent) {
-  const updateMutation = `
-    mutation updateProductVariant($productVariant: ProductVariantUpdateInput!) {
-      productVariantUpdate(productVariant: $productVariant) {
-        productVariant { 
-          id 
-          sku 
-          price 
-        }
-        userErrors { 
-          field 
-          message 
-        }
-      }
-    }
-  `;
-
-  const variantInput = {
-    id: variantId,
-    price: parseFloat(newVariant.price).toFixed(2),
-    sku: newVariant.sku,
-    inventoryPolicy: "CONTINUE"
-  };
-
-  // Agregar barcode si está disponible
-  if (newVariant.gtin && /^[0-9]{8,}$/.test(newVariant.gtin.toString())) {
-    variantInput.barcode = newVariant.gtin.toString();
-  }
-
-  const response = await admin.graphql(updateMutation, {
-    variables: { productVariant: variantInput }
-  });
-
-  const result = await parseGraphQLResponse(response);
-  
-  if (result.data?.productVariantUpdate?.userErrors?.length > 0) {
-    log(`⚠️ Error actualizando variante: ${JSON.stringify(result.data.productVariantUpdate.userErrors)}`);
-  }
-
-  if (sendProgressEvent) {
-    await sendProgressEvent('updated', `Actualizada variante: ${newVariant.sku}`);
-  }
-}
-
-// Función para agregar nueva variante a producto existente
-async function addVariantToProduct(admin, productId, newVariant, sendProgressEvent) {
-  const createMutation = `
-    mutation createProductVariant($productVariant: ProductVariantCreateInput!) {
-      productVariantCreate(productVariant: $productVariant) {
-        productVariant { 
-          id 
-          sku 
-          price 
-        }
-        userErrors { 
-          field 
-          message 
-        }
-      }
-    }
-  `;
-
-  // Generar opciones para la nueva variante
-  const sizeMatch = newVariant.title?.match(/(\d+(?:GB|TB|ML|L))/i);
-  const capacityValue = sizeMatch ? sizeMatch[1] : "Estándar";
-  
-  const CONDITIONS = {
-    "new": "Nuevo",
-    "refurbished": "Reacondicionado", 
-    "used": "Usado"
-  };
-  const conditionValue = CONDITIONS[newVariant.condition] || "Nuevo";
-
-  const variantInput = {
-    productId: productId,
-    price: parseFloat(newVariant.price).toFixed(2),
-    sku: newVariant.sku,
-    inventoryPolicy: "CONTINUE",
-    optionValues: [
-      { optionName: "Capacidad", name: capacityValue },
-      { optionName: "Condición", name: conditionValue }
-    ]
-  };
-
-  // Agregar barcode si está disponible  
-  if (newVariant.gtin && /^[0-9]{8,}$/.test(newVariant.gtin.toString())) {
-    variantInput.barcode = newVariant.gtin.toString();
-  }
-
-  const response = await admin.graphql(createMutation, {
-    variables: { productVariant: variantInput }
-  });
-
-  const result = await parseGraphQLResponse(response);
-  
-  if (result.data?.productVariantCreate?.userErrors?.length > 0) {
-    log(`⚠️ Error creando nueva variante: ${JSON.stringify(result.data.productVariantCreate.userErrors)}`);
-  }
-
-  if (sendProgressEvent) {
-    await sendProgressEvent('created', `Nueva variante: ${newVariant.sku}`);
-  }
-}
-
-// Función para actualizar imágenes del producto
-async function updateProductImages(admin, productId, variants) {
-  // Obtener imágenes únicas de todas las variantes
-  const imageUrls = [...new Set(
-    variants
-      .map(v => v.image_link)
-      .filter(Boolean)
-  )];
-
-  if (imageUrls.length === 0) return;
-
-  for (const imageUrl of imageUrls) {
-    try {
-      const mediaMutation = `
-        mutation createMedia($media: [CreateMediaInput!]!, $productId: ID!) {
-          productCreateMedia(media: $media, productId: $productId) {
-            media {
-              id
-              status
-            }
-            mediaUserErrors {
-              field
-              message
-            }
-          }
-        }
-      `;
-
-      const response = await admin.graphql(mediaMutation, {
-        variables: {
-          productId: productId,
-          media: [{
-            originalSource: imageUrl,
-            mediaContentType: "IMAGE"
-          }]
-        }
-      });
-
-      const result = await parseGraphQLResponse(response);
-      
-      if (result.data?.productCreateMedia?.mediaUserErrors?.length > 0) {
-        log(`⚠️ Error agregando imagen: ${JSON.stringify(result.data.productCreateMedia.mediaUserErrors)}`);
-      }
-      
-      await sleep(100); // Rate limiting
-    } catch (error) {
-      log(`⚠️ Error procesando imagen ${imageUrl}:`, error);
-    }
-  }
 }
 
 async function withRetry(fn, retries = CONFIG.RETRY_COUNT) {
@@ -536,15 +410,6 @@ const PRODUCT_CREATE = `
           }
         }
       }
-      userErrors { field message }
-    }
-  }
-`;
-
-const PRODUCT_UPDATE = `
-  mutation updateProduct($id: ID!, $input: ProductInput!) {
-    productUpdate(id: $id, input: $input) {
-      product { id title handle }
       userErrors { field message }
     }
   }
@@ -1386,19 +1251,18 @@ async function updateDefaultVariant(admin, variantId, p, productId = null) {
       }
     }
     
+    // Preparar la estructura de variante para productSet
     const variantInput = {
       id: variantId,
       price: parseFloat(p.price).toString(),
-      sku: sku, // SKU único para cada variante
+      sku: sku,
+      inventoryPolicy: "DENY"
     };
     
     // Barcode: solo números y mínimo 8 dígitos
     if (p.gtin && /^[0-9]{8,}$/.test(p.gtin.toString())) {
       variantInput.barcode = p.gtin.toString();
     }
-    
-    // InventoryPolicy: usar valor válido del enum
-    variantInput.inventoryPolicy = "DENY";
     
     // Opciones obligatorias: Capacidad y Condición
     const optionValues = [];
@@ -1411,7 +1275,7 @@ async function updateDefaultVariant(admin, variantId, p, productId = null) {
     // Condición (mapear o usar "Nuevo")
     const CONDITIONS = {
       "new": "Nuevo",
-      "refurbished": "Reacondicionado",
+      "refurbished": "Reacondicionado", 
       "used": "Usado"
     };
     const conditionValue = p.condition ? 
@@ -1427,27 +1291,43 @@ async function updateDefaultVariant(admin, variantId, p, productId = null) {
     // Incluir opciones en la variante
     variantInput.optionValues = optionValues;
     
-    if (CONFIG.LOG) {
-      log(`🔧 Actualizando variante ${variantId}:`, variantInput);
+    // Imagen si existe
+    if (p.image_link) {
+      try {
+        new URL(p.image_link);
+        variantInput.media = [{
+          originalSource: p.image_link,
+          alt: `${p.title} - ${p.color || 'Imagen del producto'}`.slice(0, 120),
+          mediaContentType: "IMAGE"
+        }];
+      } catch (error) {
+        log(`⚠️ URL de imagen inválida ignorada: ${p.image_link}`);
+      }
     }
     
+    if (CONFIG.LOG) {
+      log(`🔧 Actualizando variante con productSet ${variantId}:`, variantInput);
+    }
+    
+    // Usar productSet para actualizar la variante
+    const productSetInput = {
+      id: actualProductId,
+      variants: [variantInput]
+    };
+    
     const rawResponse = await withRetry(() =>
-      // admin.graphql(VARIANT_UPDATE_INDIVIDUAL, { 
-      //   variables: { 
-      //     productVariant: variantInput  // Nota: productVariant, no productId + variants
-      //   } 
-      // })
-      // TODO: Reemplazar con productSet mutation
-      Promise.resolve({ data: { productVariantUpdate: { userErrors: [] } } })
+      admin.graphql(PRODUCT_SET, {
+        variables: { input: productSetInput }
+      })
     );
     
     const responseData = await parseGraphQLResponse(rawResponse);
     
-    const errors = responseData?.data?.productVariantUpdate?.userErrors || [];
+    const errors = responseData?.data?.productSet?.userErrors || [];
     if (errors.length) {
-      log(`❌ Error actualizando variante:`, errors);
+      log(`❌ Error actualizando variante con productSet:`, errors);
     } else {
-      log(`✅ Variante actualizada correctamente`);
+      log(`✅ Variante actualizada correctamente con productSet`);
     }
     
   } catch (error) {
@@ -1460,58 +1340,66 @@ async function updateDefaultVariant(admin, variantId, p, productId = null) {
 // =============================================================================
 
 async function updateShopifyProduct(admin, existing, p) {
-  const input = {
+  // Preparar datos del producto para productSet
+  const productSetInput = {
+    id: existing.id,
     title: p.title,
     vendor: p.vendor,
     bodyHtml: p.description,
     status: p.status,
     tags: Array.from(
       new Set([...(existing.tags || "").split(", "), ...(p.tags || [])])
-    ).join(", "),
+    ).join(", ")
   };
 
+  // Actualizar variante por defecto si existe
+  const variant = existing.variants?.edges?.[0]?.node;
+  if (variant) {
+    const variantInput = { id: variant.id };
+    
+    // Solo agregar campos que han cambiado
+    if (p.price && p.price.toString() !== variant.price) {
+      variantInput.price = p.price.toString();
+    }
+    if (p.sku && p.sku !== variant.sku) {
+      variantInput.sku = p.sku;
+    }
+    if (p.gtin && p.gtin !== variant.barcode) {
+      variantInput.barcode = p.gtin;
+    }
+
+    // Agregar imagen si existe
+    if (p.image_link) {
+      try {
+        new URL(p.image_link);
+        variantInput.media = [{
+          originalSource: p.image_link,
+          alt: `${p.title} - Imagen del producto`.slice(0, 120),
+          mediaContentType: "IMAGE"
+        }];
+      } catch (error) {
+        log(`⚠️ URL de imagen inválida ignorada: ${p.image_link}`);
+      }
+    }
+
+    // Solo incluir variantes si hay cambios
+    if (Object.keys(variantInput).length > 1) {
+      productSetInput.variants = [variantInput];
+    }
+  }
+
   const rawResponse = await withRetry(() =>
-    admin.graphql(PRODUCT_UPDATE, { 
-      variables: { 
-        id: existing.id, 
-        input: input 
-      } 
+    admin.graphql(PRODUCT_SET, { 
+      variables: { input: productSetInput }
     })
   );
 
   const responseData = await parseGraphQLResponse(rawResponse);
   
-  const errs = responseData?.data?.productUpdate?.userErrors || [];
-  if (errs.length) return { success: false };
-
-  // Agregar imágenes al producto actualizado
-  const imagesResult = await addProductImages(admin, existing.id, [p]);
-  if (!imagesResult.success) {
-    log(`⚠️ Error agregando imágenes durante actualización: ${imagesResult.error}`);
-  }
-
-  const variant = existing.variants?.edges?.[0]?.node;
-  if (variant) {
-    const vInput = { id: variant.id };
-    if (p.price && p.price.toString() !== variant.price) vInput.price = p.price.toString();
-    if (p.sku && p.sku !== variant.sku) vInput.sku = p.sku;
-    if (p.gtin && p.gtin !== variant.barcode) vInput.barcode = p.gtin;
-
-    if (Object.keys(vInput).length > 1) { // Más que solo id
-      const rawResponse2 = await withRetry(() =>
-        // admin.graphql(VARIANT_UPDATE_INDIVIDUAL, { 
-        //   variables: { 
-        //     productVariant: vInput  // Nota: productVariant, no productId + variants
-        //   } 
-        // })
-        // TODO: Reemplazar con productSet mutation
-        Promise.resolve({ data: { productVariantUpdate: { userErrors: [] } } })
-      );
-      
-      const responseData2 = await parseGraphQLResponse(rawResponse2);
-      const errs2 = responseData2?.data?.productVariantUpdate?.userErrors || [];
-      if (errs2.length) return { success: false };
-    }
+  const errs = responseData?.data?.productSet?.userErrors || [];
+  if (errs.length) {
+    log(`❌ Error actualizando producto con productSet:`, errs);
+    return { success: false };
   }
 
   return { success: true };
