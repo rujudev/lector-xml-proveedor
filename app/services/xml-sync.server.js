@@ -10,12 +10,12 @@ import { sendProgressEvent } from "../routes/api.sync-events.jsx";
 // =============================================================================
 // Agregar configuración para procesamiento paralelo
 const CONFIG = {
-  RATE_LIMIT_DELAY: 100,
+  RATE_LIMIT_DELAY: 500, // Aumentado a 500ms entre lotes
   CACHE_ENABLED: true,
   RETRY_COUNT: 3,
   RETRY_BASE_DELAY_MS: 150,
   LOG: true,
-  PARALLEL_BATCH_SIZE: 6, // Procesar hasta 6 productos simultáneamente
+  PARALLEL_BATCH_SIZE: 3, // Reducido a 3 productos simultáneos para evitar throttling
 };
 
 const log = (...args) => CONFIG.LOG && console.log(new Date().toISOString(), ...args);
@@ -48,6 +48,20 @@ async function parseGraphQLResponse(response) {
   
   // Caso no esperado
   throw new Error(`Formato de respuesta GraphQL no reconocido: ${typeof response}`);
+}
+
+// Helper para normalizar valores de capacidad
+function normalizeCapacity(title) {
+  if (!title) return "Estándar";
+  
+  const sizeMatch = title.match(/(\d+(?:GB|TB|ML|L))/i);
+  if (!sizeMatch) return "Estándar";
+  
+  let capacity = sizeMatch[1];
+  // Normalizar capitalización: Gb -> GB, Tb -> TB, etc.
+  capacity = capacity.replace(/gb$/i, 'GB').replace(/tb$/i, 'TB').replace(/ml$/i, 'ML');
+  
+  return capacity;
 }
 
 // Función para buscar productos existentes en Shopify
@@ -143,6 +157,26 @@ async function updateExistingProduct(admin, existingProduct, newVariants, sendPr
       // Si es una variante existente, incluir ID para actualización
       if (existingVariant) {
         variantInput.id = existingVariant.node.id;
+        
+        // ✅ CORRECCIÓN: Las variantes existentes también necesitan optionValues para productSet
+        const capacityValue = normalizeCapacity(newVariant.title);
+        
+        const CONDITIONS = {
+          "new": "Nuevo",
+          "refurbished": "Reacondicionado", 
+          "used": "Usado"
+        };
+        const conditionValue = CONDITIONS[newVariant.condition] || "Nuevo";
+
+        variantInput.optionValues = [
+          { optionName: "Capacidad", name: capacityValue },
+          { optionName: "Condición", name: conditionValue }
+        ];
+        
+        if (newVariant.color) {
+          variantInput.optionValues.push({ optionName: "Color", name: newVariant.color });
+        }
+        
         updatedVariantsCount++;
       } else {
         // Nueva variante - generar opciones
@@ -231,15 +265,109 @@ async function updateExistingProduct(admin, existingProduct, newVariants, sendPr
 
     // Usar productSet para actualizar producto completo con todas las variantes
     const productOptions = createProductOptions(newVariants);
+    
+    // 1️⃣ Verificar si alguna variante del grupo tiene color
+    const needsColor = newVariants.some(v => v.color && v.color.trim() !== "");
+
+    // 2️⃣ Verificar si ya existe la opción "Color" en productOptions
+    const hasColorOption = productOptions.some(o => o.name === "Color");
+
+    // 3️⃣ Si alguna variante tiene color pero el producto no tiene esa opción → agregarla
+    if (needsColor && !hasColorOption) {
+      const uniqueColors = [...new Set(newVariants.map(v => v.color).filter(Boolean))];
+      if (uniqueColors.length > 0) {
+        productOptions.push({
+          name: "Color",
+          values: uniqueColors.map(color => ({ name: color }))
+        });
+        log(`🎨 Añadida opción 'Color' automáticamente con valores: ${uniqueColors.join(", ")}`);
+      }
+    }
+
+    // 4️⃣ Normalizar todas las variantes para que coincidan con las opciones del producto
+    variantsToUpdate.forEach(variant => {
+      const normalized = [];
+      
+      // Buscar la variante correspondiente del XML para obtener datos actualizados
+      const correspondingNewVariant = newVariants.find(nv => nv.sku === variant.sku);
+
+      // Asegurar opción Capacidad
+      const capacity = normalizeCapacity(variant.title || baseVariant.title);
+      if (productOptions.some(o => o.name === "Capacidad")) {
+        normalized.push({ optionName: "Capacidad", name: capacity });
+      }
+
+      // Asegurar opción Condición
+      const conditionMap = { new: "Nuevo", refurbished: "Reacondicionado", used: "Usado" };
+      const conditionValue = conditionMap[(variant.condition || correspondingNewVariant?.condition || "").toLowerCase()] || "Nuevo";
+      if (productOptions.some(o => o.name === "Condición")) {
+        normalized.push({ optionName: "Condición", name: conditionValue });
+      }
+
+      // Asegurar opción Color
+      if (productOptions.some(o => o.name === "Color")) {
+        const colorValue = variant.color || correspondingNewVariant?.color;
+        // Solo añadir color si realmente existe, sino omitir esta opción
+        if (colorValue && colorValue.trim() !== "") {
+          normalized.push({ optionName: "Color", name: colorValue });
+        } else {
+          // Si no hay color definido, buscar el primer color disponible en productOptions
+          const colorOption = productOptions.find(o => o.name === "Color");
+          if (colorOption && colorOption.values.length > 0) {
+            normalized.push({ optionName: "Color", name: colorOption.values[0].name });
+          }
+        }
+      }
+
+      variant.optionValues = normalized;
+    });
+
+    // 5️⃣ Validar que todas las variantes tengan optionValues válidos que existan en productOptions
+    variantsToUpdate.forEach((variant, index) => {
+      if (!variant.optionValues || variant.optionValues.length === 0) {
+        log(`❌ Variante ${index} tiene optionValues inválido:`, variant.optionValues);
+        throw new Error(`Variante ${index} no tiene optionValues válidos`);
+      }
+
+      // Verificar que cada optionValue existe en productOptions
+      variant.optionValues.forEach((optionValue, ovIndex) => {
+        const productOption = productOptions.find(po => po.name === optionValue.optionName);
+        if (!productOption) {
+          log(`❌ Variante ${index}, optionValue ${ovIndex}: La opción "${optionValue.optionName}" no existe en productOptions`);
+          throw new Error(`La opción "${optionValue.optionName}" no existe en productOptions`);
+        }
+
+        const valueExists = productOption.values.some(v => v.name === optionValue.name);
+        if (!valueExists) {
+          log(`❌ Variante ${index}, optionValue ${ovIndex}: El valor "${optionValue.name}" no existe en la opción "${optionValue.optionName}"`);
+          log(`📋 Valores disponibles: ${productOption.values.map(v => v.name).join(', ')}`);
+          
+          // Usar el primer valor disponible como fallback
+          optionValue.name = productOption.values[0].name;
+          log(`🔧 Usando fallback: "${optionValue.name}"`);
+        }
+      });
+    });
+
+    // 6️⃣ Construir el input final para productSet
     const productSetInput = {
       id: productId,
       title: baseVariant.title,
-      bodyHtml: baseVariant.description,
+      descriptionHtml: baseVariant.description,
       vendor: baseVariant.brand,
       tags: baseVariant.tags,
       productOptions: productOptions,
       variants: variantsToUpdate
     };
+
+    // Log crítico antes de enviar a Shopify
+    log(`🔍 PRODUCTSET INPUT - updateExistingProduct:`);
+    log(`   ProductOptions: ${productOptions.length} opciones`);
+    log(`   Total Variants: ${variantsToUpdate.length} variantes`);
+    variantsToUpdate.forEach((v, i) => {
+      log(`   Variant ${i + 1}: ${v.optionValues.length} optionValues`);
+      v.optionValues.forEach((ov, j) => log(`     Value ${j + 1}: ${ov.optionName} = ${ov.name}`));
+    });
 
     const response = await withRetry(() => 
       admin.graphql(PRODUCT_SET, {
@@ -299,9 +427,20 @@ async function withRetry(fn, retries = CONFIG.RETRY_COUNT) {
       return await fn();
     } catch (err) {
       attempt++;
+      
+      // Detección específica de throttling
+      const isThrottled = err.message?.includes('Throttled') || 
+                         err.message?.includes('throttle') ||
+                         err.message?.includes('rate limit') ||
+                         err.status === 429;
+      
       if (attempt >= retries) throw err;
-      const delay = CONFIG.RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1);
-      log(`⚠️ Retry ${attempt}/${retries} after ${delay}ms - ${err.message}`);
+      
+      // Delay más largo para throttling
+      const baseDelay = isThrottled ? CONFIG.RETRY_BASE_DELAY_MS * 4 : CONFIG.RETRY_BASE_DELAY_MS;
+      const delay = baseDelay * Math.pow(2, attempt - 1);
+      
+      log(`⚠️ Retry ${attempt}/${retries} after ${delay}ms - ${err.message}${isThrottled ? ' [THROTTLING]' : ''}`);
       await sleep(delay);
     }
   }
@@ -961,7 +1100,51 @@ async function createShopifyProductWithVariants(admin, variants) {
 
     // Paso 3: Si hay múltiples variantes, establecer todas las variantes de una vez
     if (variants.length > 1) {
-      const variantsResult = await createProductVariants(admin, createdProduct, variants);
+      await sleep(300); // pequeña espera para asegurar que Shopify registre las opciones
+
+      const GET_PRODUCT_OPTIONS = `
+        query getProductOptions($id: ID!) {
+          product(id: $id) {
+            id
+            title
+            options {
+              name
+              values
+            }
+          }
+        }
+      `;
+
+      let variantsResult;
+      
+      try {
+        const optionsResponse = await admin.graphql(GET_PRODUCT_OPTIONS, {
+          variables: { id: createdProduct.id },
+        });
+
+        const optionsData = await parseGraphQLResponse(optionsResponse);
+        const confirmedOptions = optionsData?.data?.product?.options || [];
+
+        if (confirmedOptions.length > 0) {
+          log(
+            `✅ Opciones confirmadas desde Shopify: ${confirmedOptions
+              .map((o) => o.name)
+              .join(", ")}`
+          );
+          variantsResult = await createProductVariants(
+            admin,
+            { ...createdProduct, options: confirmedOptions },
+            variants
+          );
+        } else {
+          log("⚠️ No se encontraron opciones en Shopify; usando locales");
+          variantsResult = await createProductVariants(admin, createdProduct, variants);
+        }
+      } catch (err) {
+        log("⚠️ Error al confirmar opciones, usando locales:", err.message);
+        variantsResult = await createProductVariants(admin, createdProduct, variants);
+      }
+
       if (!variantsResult.success) {
         log(`⚠️ Error estableciendo variantes, pero producto base creado: ${variantsResult.error}`);
       } else {
@@ -998,25 +1181,37 @@ function variantExists(product, variant) {
 
 async function createProductVariants(admin, product, variants) {
   try {
+    // --- Opciones del producto disponibles ---
+    const existingProductOptions = (product.options?.length ? product.options.map(o => o.name) : createProductOptions(variants).map(o => o.name));
+
+    log(`🎯 ProductOptions existentes en producto: [${existingProductOptions.join(', ')}]`);
+    
+    // Si no hay opciones definidas, detectar automáticamente basándose en variantes
+    const needsColorOption = variants.some(v => v.color && v.color.trim() !== '');
+    log(`🎨 ¿Necesita opción Color? ${needsColorOption} (algunas variantes tienen color)`);
+    
     // Preparar variantes para bulk create (excluir la primera que ya existe)
     const variantsInput = variants.slice(1).map(variant => {
-      console.log('@@@ variante', variant);
 
-      // --- Opciones base: incluir siempre Capacidad y Condición ---
-      const productOptions = product.options?.map(o => o.name) || [];
+      // --- Opciones base: MISMO ORDEN que createProductOptions ---
       const optionValues = [];
 
-      // Color (solo si existe en las opciones del producto)
-      if (variant.color && productOptions.includes("Color")) {
-        optionValues.push({ optionName: "Color", name: variant.color });
+      // 1. Color PRIMERO (SOLO si existe en las opciones del producto O si alguna variante tiene color)
+      const shouldAddColor = existingProductOptions.includes("Color") || needsColorOption;
+      if (shouldAddColor) {
+        const colorValue = variant.color || "Sin especificar";
+        optionValues.push({ optionName: "Color", name: colorValue });
+        log(`✅ Color agregado a variante: ${colorValue} (variant.color: ${variant.color || 'undefined'})`);
+      } else {
+        log(`❌ Color NO agregado - no en productOptions y ninguna variante tiene color`);
       }
 
-      // Capacidad (SIEMPRE incluir)
-      const sizeMatch = variant.title.match(/(\d+(?:GB|TB|ML|L))/i);
-      const capacityValue = sizeMatch ? sizeMatch[1] : "Estándar";
+      // 2. Capacidad (SIEMPRE incluir, pero posición depende de si hay Color)
+      const capacityValue = normalizeCapacity(variant.title);
+      log(`📏 Capacidad extraída: "${capacityValue}" de título "${variant.title}"`);
       optionValues.push({ optionName: "Capacidad", name: capacityValue });
 
-      // Condición (SIEMPRE incluir)
+      // 3. Condición (SIEMPRE incluir)
       const CONDITIONS = {
         "new": "Nuevo",
         "refurbished": "Reacondicionado",
@@ -1026,6 +1221,10 @@ async function createProductVariants(admin, product, variants) {
         (CONDITIONS[variant.condition] || variant.condition) : 
         "Nuevo";
       optionValues.push({ optionName: "Condición", name: conditionValue });
+
+      // Crear clave única para detectar duplicados
+      const variantKey = optionValues.map(ov => `${ov.optionName}:${ov.name}`).sort().join('|');
+      log(`🔑 Variante key: ${variantKey}`);
 
       if (variantExists(product, { optionValues })) {
         log(`⚠️ Variante ya existe: ${optionValues.map(o => o.name).join(" / ")}`);
@@ -1064,15 +1263,43 @@ async function createProductVariants(admin, product, variants) {
       variantInput._pendingSku = variant.sku;
 
       return variantInput;
+    }).filter(Boolean); // Eliminar nulos
+
+    // Filtrar variantes duplicadas por optionValues únicos
+    const uniqueVariantsInput = [];
+    const seenKeys = new Set();
+    
+    variantsInput.forEach((variantInput, index) => {
+      if (!variantInput) return; // Skip null variants
+      
+      const variantKey = variantInput.optionValues
+        .map(ov => `${ov.optionName}:${ov.name}`)
+        .sort()
+        .join('|');
+        
+      if (seenKeys.has(variantKey)) {
+        log(`🚫 Eliminando variante duplicada ${index}: ${variantKey}`);
+      } else {
+        seenKeys.add(variantKey);
+        uniqueVariantsInput.push(variantInput);
+      }
     });
 
-    if (variantsInput.length === 0) {
+    if (uniqueVariantsInput.length === 0) {
       return { success: true }; // No hay variantes adicionales que crear
     }
 
-    if (CONFIG.LOG) {
-      log(`🎯 Creando ${variantsInput.length} variantes adicionales`);
-    }
+    // Validación crítica: verificar que las variantes tengan optionValues para todas las opciones del producto
+    uniqueVariantsInput.forEach((variantInput, index) => {
+      existingProductOptions.forEach(optionName => {
+        const hasValue = variantInput.optionValues.some(ov => ov.optionName === optionName);
+        if (!hasValue) {
+          log(`❌ ERROR CRÍTICO: Variante ${index} no tiene valor para opción "${optionName}"`);
+          log(`   ProductOptions del producto: [${existingProductOptions.join(', ')}]`);
+          log(`   OptionValues de la variante: [${variantInput.optionValues.map(ov => `${ov.optionName}:${ov.name}`).join(', ')}]`);
+        }
+      });
+    });
 
     // --- Paso 1: Crear medios (imágenes) primero ---
     const masterVariant = variants[0]; // Primer elemento como variante principal
@@ -1081,7 +1308,7 @@ async function createProductVariants(admin, product, variants) {
     const allImageUrls = new Set();
     
     // Recolectar todas las URLs únicas de imágenes de todas las variantes
-    [masterVariant, ...variantsInput.filter(v => v)].forEach(variant => {
+    [masterVariant, ...uniqueVariantsInput].forEach(variant => {
       const imageUrl = variant.image_link || variant._originalImageUrl;
       if (imageUrl) {
         allImageUrls.add(imageUrl);
@@ -1142,16 +1369,18 @@ async function createProductVariants(admin, product, variants) {
     };
     
     // Generar opciones para la variante principal
-    const sizeMatch = masterVariant.title?.match(/(\d+(?:GB|TB|ML|L))/i);
-    const capacityValue = sizeMatch ? sizeMatch[1] : "Estándar";
+    const capacityValue = normalizeCapacity(masterVariant.title);
     masterVariantInput.optionValues.push({ optionName: "Capacidad", name: capacityValue });
     
     const CONDITIONS = { "new": "Nuevo", "refurbished": "Reacondicionado", "used": "Usado" };
     const conditionValue = CONDITIONS[masterVariant.condition] || "Nuevo";
     masterVariantInput.optionValues.push({ optionName: "Condición", name: conditionValue });
     
+    // Color: incluir si existe, o valor por defecto si Color está en productOptions
     if (masterVariant.color) {
       masterVariantInput.optionValues.push({ optionName: "Color", name: masterVariant.color });
+    } else {
+      // Se agregará después si es necesario cuando se verifiquen las productOptions
     }
     
     // Asignar mediaId si existe imagen para la variante principal
@@ -1162,7 +1391,7 @@ async function createProductVariants(admin, product, variants) {
     allVariants.push(masterVariantInput);
     
     // Agregar variantes adicionales con mediaId
-    allVariants.push(...variantsInput.filter(v => v).map(variant => {
+    allVariants.push(...uniqueVariantsInput.map(variant => {
       const variantData = {
         price: variant.price,
         inventoryPolicy: variant.inventoryPolicy,
@@ -1184,15 +1413,31 @@ async function createProductVariants(admin, product, variants) {
     const productSetInput = {
       id: product.id,
       productOptions: productOptions,
-      variants: allVariants.map(variant => ({
-        price: variant.price,
-        inventoryPolicy: variant.inventoryPolicy,
-        sku: variant.sku.toString(),
-        barcode: variant.barcode,
-        optionValues: variant.optionValues,
-        ...(variant.mediaId && { mediaId: variant.mediaId }) // Solo incluir si existe
-      }))
+      variants: allVariants.map(variant => {
+        // Asegurar que todas las variantes tengan valores para todas las opciones
+        const finalOptionValues = normalizeVariantOptionValues(
+          productOptions,
+          variant.optionValues
+        );
+        
+        return {
+          price: variant.price,
+          inventoryPolicy: variant.inventoryPolicy,
+          sku: variant.sku.toString(),
+          barcode: variant.barcode,
+          optionValues: finalOptionValues,
+          ...(variant.mediaId ? { mediaId: variant.mediaId } : {})
+        };
+      })
     };
+
+    // Log crítico antes de productSet
+    log(`🔍 PRODUCTSET INPUT - createProductVariants:`);
+    log(`   ProductOptions existentes: ${existingProductOptions.length} opciones - [${existingProductOptions.join(', ')}]`);
+    log(`   Total Variants: ${productSetInput.variants.length} variantes`);
+    productSetInput.variants.forEach((v, i) => {
+      log(`   Variant ${i+1}: ${v.optionValues.length} optionValues - [${v.optionValues.map(ov => `${ov.optionName}=${ov.name}`).join(', ')}]`);
+    });
 
     const rawResponse = await withRetry(() =>
       admin.graphql(PRODUCT_SET, {
@@ -1346,118 +1591,91 @@ async function updateDefaultVariant(admin, variantId, p, productId = null) {
       }
     }
     
-    // Preparar la estructura de variante para productSet
-    const variantInput = {
-      id: variantId,
-      price: parseFloat(p.price).toString(),
-      sku: sku ? sku.toString() : undefined,
-      inventoryPolicy: "DENY"
-    };
+    // ✅ NUEVO: Actualizar las opciones del producto antes de actualizar la variante
+    // Crear las opciones correctas basadas en los datos del producto
+    const correctProductOptions = [];
     
-    // Barcode: solo números y mínimo 8 dígitos
-    if (p.gtin && /^[0-9]{8,}$/.test(p.gtin.toString())) {
-      variantInput.barcode = p.gtin.toString();
-    }
+    // Capacidad
+    const capacityValue = normalizeCapacity(p.title);
+    correctProductOptions.push({
+      name: "Capacidad",
+      values: [{ name: capacityValue }]
+    });
     
-    // Opciones obligatorias: Capacidad y Condición
-    const optionValues = [];
-    
-    // Capacidad (extraer del título o usar "Estándar")
-    const sizeMatch = p.title?.match(/(\d+(?:GB|TB|ML|L))/i);
-    const capacityValue = sizeMatch ? sizeMatch[1] : "Estándar";
-    optionValues.push({ optionName: "Capacidad", name: capacityValue });
-    
-    // Condición (mapear o usar "Nuevo")
-    const CONDITIONS = {
+    // Condición  
+    const CONDITIONS_DISPLAY = {
       "new": "Nuevo",
       "refurbished": "Reacondicionado", 
       "used": "Usado"
     };
     const conditionValue = p.condition ? 
-      (CONDITIONS[p.condition] || p.condition) : 
+      (CONDITIONS_DISPLAY[p.condition] || p.condition) : 
       "Nuevo";
-    optionValues.push({ optionName: "Condición", name: conditionValue });
+    correctProductOptions.push({
+      name: "Condición", 
+      values: [{ name: conditionValue }]
+    });
     
-    // Color (solo si existe)
+    // Color si existe
     if (p.color) {
-      optionValues.push({ optionName: "Color", name: p.color });
+      correctProductOptions.push({
+        name: "Color",
+        values: [{ name: p.color }]
+      });
     }
     
-    // Incluir opciones en la variante
-    variantInput.optionValues = optionValues;
+    log(`🔧 Actualizando opciones del producto a: [${correctProductOptions.map(o => o.name).join(', ')}]`);
     
-    // Crear imagen si existe y obtener mediaId
-    if (p.image_link) {
-      try {
-        new URL(p.image_link);
-        
-        // Crear media primero
-        const mediaResponse = await withRetry(() =>
-          admin.graphql(PRODUCT_CREATE_MEDIA, {
-            variables: {
-              productId: actualProductId,
-              media: [{
-                originalSource: p.image_link,
-                alt: `${p.title} - ${p.color || 'Imagen del producto'}`.slice(0, 120),
-                mediaContentType: "IMAGE"
-              }]
-            }
-          })
-        );
-        
-        const mediaData = await parseGraphQLResponse(mediaResponse);
-        const mediaErrors = mediaData?.data?.productCreateMedia?.mediaUserErrors || [];
-        
-        if (mediaErrors.length === 0) {
-          const createdMedia = mediaData?.data?.productCreateMedia?.media?.[0];
-          if (createdMedia?.id) {
-            variantInput.mediaId = createdMedia.id;
-            if (CONFIG.LOG) {
-              log(`✅ Media creado para variante: ${createdMedia.id}`);
-            }
-          }
-        } else {
-          log(`❌ Error creando media para variante:`, mediaErrors);
-        }
-      } catch (error) {
-        log(`⚠️ URL de imagen inválida ignorada: ${p.image_link}`);
-      }
-    }
-    
-    if (CONFIG.LOG) {
-      log(`🔧 Actualizando variante con productSet ${variantId}:`, variantInput);
-    }
-    
-    // Usar productSet para actualizar la variante
-    const productOptions = createProductOptions([p]);
-    const productSetInput = {
-      id: actualProductId,
-      productOptions: productOptions,
-      variants: [variantInput]
+    // Preparar la variante con los optionValues correctos para incluir en la actualización
+    const variantForUpdate = {
+      id: variantId,
+      price: parseFloat(p.price).toString(),
+      sku: sku ? sku.toString() : undefined,
+      inventoryPolicy: "DENY",
+      optionValues: [
+        { optionName: "Capacidad", name: capacityValue },
+        { optionName: "Condición", name: conditionValue }
+      ]
     };
     
-    const rawResponse = await withRetry(() =>
+    // Agregar Color si existe
+    if (p.color) {
+      variantForUpdate.optionValues.push({ optionName: "Color", name: p.color });
+    }
+    
+    // Barcode si es válido
+    if (p.gtin && /^[0-9]{8,}$/.test(p.gtin.toString())) {
+      variantForUpdate.barcode = p.gtin.toString();
+    }
+    
+    // Actualizar el producto con las opciones correctas Y la variante
+    const updateProductInput = {
+      id: actualProductId,
+      productOptions: correctProductOptions,
+      variants: [variantForUpdate] // INCLUIR la variante es obligatorio
+    };
+    
+    const updateProductResponse = await withRetry(() =>
       admin.graphql(PRODUCT_SET, {
-        variables: { input: productSetInput }
+        variables: { input: updateProductInput }
       })
     );
     
-    const responseData = await parseGraphQLResponse(rawResponse);
-    
-    const errors = responseData?.data?.productSet?.userErrors || [];
-    if (errors.length) {
-      log(`❌ Error actualizando variante con productSet:`, errors);
+    const updateProductResult = await parseGraphQLResponse(updateProductResponse);
+    if (updateProductResult.data?.productSet?.userErrors?.length > 0) {
+      log(`❌ Error actualizando opciones del producto:`, updateProductResult.data.productSet.userErrors);
+      return; // Salir si hay errores
     } else {
-      log(`✅ Variante actualizada correctamente con productSet`);
+      log(`✅ Opciones del producto y variante actualizadas correctamente`);
     }
     
+    // Ya se actualizó todo en una sola operación, no necesitamos más lógica
+    return;
   } catch (error) {
-    log(`💥 Error actualizando variante: ${error.message}`);
+    log(`❌ Error en updateDefaultVariant: ${error.message}`);
+    throw error;
   }
 }
-
-// =============================================================================
-// PRODUCT UPDATE
 // =============================================================================
 
 async function updateShopifyProduct(admin, existing, p) {
@@ -1466,7 +1684,7 @@ async function updateShopifyProduct(admin, existing, p) {
     id: existing.id,
     title: p.title,
     vendor: p.vendor,
-    bodyHtml: p.description,
+    descriptionHtml: p.description,
     status: p.status,
     tags: Array.from(
       new Set([...(existing.tags || "").split(", "), ...(p.tags || [])])
@@ -1530,6 +1748,19 @@ async function updateShopifyProduct(admin, existing, p) {
     }
   }
 
+  // Log crítico antes de productSet
+  log(`🔍 PRODUCTSET INPUT - updateShopifyProduct:`);
+  log(`   Producto: ${productSetInput.id}`);
+  if (productSetInput.variants) {
+    log(`   Variantes: ${productSetInput.variants.length}`);
+    productSetInput.variants.forEach((v, i) => {
+      const fields = Object.keys(v).filter(k => k !== 'id');
+      log(`   Variant ${i+1}: ${fields.join(', ')}`);
+    });
+  } else {
+    log(`   Sin variantes`);
+  }
+
   const rawResponse = await withRetry(() =>
     admin.graphql(PRODUCT_SET, { 
       variables: { input: productSetInput }
@@ -1565,10 +1796,6 @@ async function processVariantGroup(admin, groupId, variants, cache, shop, global
   try {
     const isVariantGroup = variants.length > 1;
     const masterProduct = isVariantGroup ? selectMasterProduct(variants) : variants[0];
-    
-    if (CONFIG.LOG && isVariantGroup) {
-      log(`🔄 Procesando grupo de variantes ${groupId}: ${variants.length} variantes`);
-    }
     
     // Enviar evento de procesamiento actual
     if (shop) {
@@ -1672,11 +1899,8 @@ async function processVariantGroup(admin, groupId, variants, cache, shop, global
       }
     }
     
+    // Si llegamos aquí, algo falló
     if (!result.success) {
-      if (CONFIG.LOG) {
-        log(`❌ Error procesando grupo ${groupId}: ${result.error}`);
-      }
-      
       // Enviar evento de error
       if (shop) {
         await sendProgressEvent(shop, {
@@ -1708,6 +1932,40 @@ async function processVariantGroup(admin, groupId, variants, cache, shop, global
     
     return { success: false, error: err.message };
   }
+}
+
+function normalizeVariantOptionValues(productOptions, variantOptionValues) {
+  const map = Object.fromEntries(
+    (variantOptionValues || []).map(ov => [ov.optionName, ov.name])
+  );
+
+  const CONDITIONS = {
+    "new": "Nuevo",
+    "refurbished": "Reacondicionado",
+    "used": "Usado"
+  };
+
+  return productOptions.map(opt => {
+    if (opt.name === "Capacidad") {
+      // extraer capacidad si no viene en variantOptionValues
+      const extracted = map["Capacidad"] || "Estándar";
+      return { optionName: "Capacidad", name: extracted };
+    }
+
+    if (opt.name === "Condición") {
+      const raw = map["Condición"] || "new";
+      const resolved = CONDITIONS[raw] || raw;
+      return { optionName: "Condición", name: resolved };
+    }
+
+    if (opt.name === "Color") {
+      const color = map["Color"] || "Sin especificar";
+      return { optionName: "Color", name: color };
+    }
+
+    // fallback for any non-expected option
+    return { optionName: opt.name, name: map[opt.name] || "Sin especificar" };
+  });
 }
 
 // =============================================================================
@@ -1969,7 +2227,7 @@ export async function processProductsParallel(admin, products, shop) {
 
       // Pequeña pausa entre lotes para evitar sobrecarga
       if (i + CONFIG.PARALLEL_BATCH_SIZE < groupEntries.length) {
-        await sleep(CONFIG.RATE_LIMIT_DELAY);
+        await sleep(CONFIG.RATE_LIMIT_DELAY + 200); // Delay adicional de 200ms
       }
       
     } catch (batchError) {
