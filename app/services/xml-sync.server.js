@@ -1604,7 +1604,7 @@ async function createProductVariants(admin, product, variants) {
       const seenSignatures = new Set();
       const uniqueVariants = [];
       
-      productSetInput.variants.forEach((variant, idx) => {
+      productSetInput.variants.forEach((variant) => {
         const signature = variant.optionValues.map(ov => ov.name).join(' / ');
         if (seenSignatures.has(signature)) {
           log(`   🚫 Eliminando duplicado final: "${signature}" (SKU: ${variant.sku})`);
@@ -2116,39 +2116,39 @@ async function processVariantGroup(admin, groupId, variants, cache, shop, global
   }
 }
 
-function normalizeVariantOptionValues(productOptions, variantOptionValues) {
-  const map = Object.fromEntries(
-    (variantOptionValues || []).map(ov => [ov.optionName, ov.name])
-  );
+// function normalizeVariantOptionValues(productOptions, variantOptionValues) {
+//   const map = Object.fromEntries(
+//     (variantOptionValues || []).map(ov => [ov.optionName, ov.name])
+//   );
 
-  const CONDITIONS = {
-    "new": "Nuevo",
-    "refurbished": "Reacondicionado",
-    "used": "Usado"
-  };
+//   const CONDITIONS = {
+//     "new": "Nuevo",
+//     "refurbished": "Reacondicionado",
+//     "used": "Usado"
+//   };
 
-  return productOptions.map(opt => {
-    if (opt.name === "Capacidad") {
-      // extraer capacidad si no viene en variantOptionValues
-      const extracted = map["Capacidad"] || "Estándar";
-      return { optionName: "Capacidad", name: extracted };
-    }
+//   return productOptions.map(opt => {
+//     if (opt.name === "Capacidad") {
+//       // extraer capacidad si no viene en variantOptionValues
+//       const extracted = map["Capacidad"] || "Estándar";
+//       return { optionName: "Capacidad", name: extracted };
+//     }
 
-    if (opt.name === "Condición") {
-      const raw = map["Condición"] || "new";
-      const resolved = CONDITIONS[raw] || raw;
-      return { optionName: "Condición", name: resolved };
-    }
+//     if (opt.name === "Condición") {
+//       const raw = map["Condición"] || "new";
+//       const resolved = CONDITIONS[raw] || raw;
+//       return { optionName: "Condición", name: resolved };
+//     }
 
-    if (opt.name === "Color") {
-      const color = map["Color"] || "Sin especificar";
-      return { optionName: "Color", name: color };
-    }
+//     if (opt.name === "Color") {
+//       const color = map["Color"] || "Sin especificar";
+//       return { optionName: "Color", name: color };
+//     }
 
-    // fallback for any non-expected option
-    return { optionName: opt.name, name: map[opt.name] || "Sin especificar" };
-  });
-}
+//     // fallback for any non-expected option
+//     return { optionName: opt.name, name: map[opt.name] || "Sin especificar" };
+//   });
+// }
 
 // =============================================================================
 // MAIN PROCESSOR WITH VARIANTS SUPPORT (ORIGINAL)

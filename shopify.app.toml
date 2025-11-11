@@ -27,5 +27,5 @@ scopes = "write_products,write_inventory"
 redirect_urls = [
   "https://sync-app.fly.dev/auth/callback",
   "https://sync-app.fly.dev/auth/shopify/callback",
-  "https://sync-app.fly.dev/api/auth/callback"
+  "https://sync-app.fly.dev/api/auth/callback",
 ]

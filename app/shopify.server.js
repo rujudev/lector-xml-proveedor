@@ -16,11 +16,6 @@ const shopify = shopifyApp({
   authPathPrefix: "/auth",
   sessionStorage: new PrismaSessionStorage(prisma),
   distribution: AppDistribution.AppStore,
-  logger: {
-    level: process.env.LOG_LEVEL || 'warn',
-    httpRequests: false, // Desactiva logs de HTTP requests
-    timestamps: false,   // Desactiva timestamps verbosos
-  },
   ...(process.env.SHOP_CUSTOM_DOMAIN
     ? { customShopDomains: [process.env.SHOP_CUSTOM_DOMAIN] }
     : {}),
