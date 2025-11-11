@@ -1,6 +1,6 @@
 # Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
 
-application_url = "https://example.com"
+application_url = "https://www.secondtech.es"
 client_id = "f5cd656caba7027a223753d2be36fb8e"
 embedded = true
 name = "SyncApp"
@@ -24,4 +24,4 @@ uri = "/webhooks/app/scopes_update"
 scopes = "write_products,write_inventory"
 
 [auth]
-redirect_urls = ["https://example.com/api/auth"]
+redirect_urls = ["https://www.secondtech.es/api/auth"]
