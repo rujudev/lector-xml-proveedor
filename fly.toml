@@ -12,7 +12,7 @@ primary_region = 'cdg'
 PORT = '3000'
 SCOPES = 'write_inventory,write_products'
 SHOPIFY_API_KEY = 'f5cd656caba7027a223753d2be36fb8e'
-SHOPIFY_APP_URL = 'https://sync-app.fly.dev/'
+SHOPIFY_APP_URL = 'https://sync-app.fly.dev'
 
 [processes]
 app = 'node ./dbsetup.js npm run docker-start'

@@ -79,13 +79,10 @@ export const action = async ({ request }) => {
 
 export const loader = async ({ request }) => {
   const { session } = await authenticate.admin(request);
-  const { getSyncProgress } = await import("../services/sync-progress.server.js");
 
   const shopDomain = session.shop.replace('.myshopify.com', '');
-  const currentProgress = await getSyncProgress(shopDomain);
 
   return Response.json({
-    progress: currentProgress,
     shop: shopDomain,
     sessionId: session.id
   });
