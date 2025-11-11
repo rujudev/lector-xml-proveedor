@@ -349,6 +349,19 @@ async function updateExistingProduct(admin, existingProduct, newVariants, sendPr
       });
     });
 
+    // 🔧 Eliminar variantes duplicadas por ID antes de enviar a Shopify
+    const seenIds = new Set();
+    const uniqueVariantsToUpdate = variantsToUpdate.filter(variant => {
+      if (variant.id) {
+        if (seenIds.has(variant.id)) {
+          log(`⚠️ Variante duplicada eliminada (ID: ${variant.id})`);
+          return false;
+        }
+        seenIds.add(variant.id);
+      }
+      return true;
+    });
+
     // 6️⃣ Construir el input final para productSet
     const productSetInput = {
       id: productId,
@@ -357,14 +370,14 @@ async function updateExistingProduct(admin, existingProduct, newVariants, sendPr
       vendor: baseVariant.brand,
       tags: baseVariant.tags,
       productOptions: productOptions,
-      variants: variantsToUpdate
+      variants: uniqueVariantsToUpdate
     };
 
     // Log crítico antes de enviar a Shopify
     log(`🔍 PRODUCTSET INPUT - updateExistingProduct:`);
     log(`   ProductOptions: ${productOptions.length} opciones`);
-    log(`   Total Variants: ${variantsToUpdate.length} variantes`);
-    variantsToUpdate.forEach((v, i) => {
+    log(`   Total Variants: ${uniqueVariantsToUpdate.length} variantes (${variantsToUpdate.length - uniqueVariantsToUpdate.length} duplicados eliminados)`);
+    uniqueVariantsToUpdate.forEach((v, i) => {
       log(`   Variant ${i + 1}: ${v.optionValues.length} optionValues`);
       v.optionValues.forEach((ov, j) => log(`     Value ${j + 1}: ${ov.optionName} = ${ov.name}`));
     });
@@ -810,13 +823,8 @@ function createProductOptions(variants) {
     if (variant.color) colorSet.add(variant.color);
     
     // Extraer capacidad/tamaño del título (ej: "256GB", "512GB")
-    const sizeMatch = variant.title.match(/(\d+(?:GB|TB|ML|L))/i);
-    if (sizeMatch) {
-      sizeSet.add(sizeMatch[1]);
-    } else {
-      // Si no se encuentra capacidad en el título, usar un valor por defecto
-      sizeSet.add("Estándar");
-    }
+    const capacityValue = normalizeCapacity(variant.title);
+    sizeSet.add(capacityValue);
     
     if (variant.condition) {
       conditionSet.add(variant.condition);
@@ -1181,14 +1189,36 @@ function variantExists(product, variant) {
 
 async function createProductVariants(admin, product, variants) {
   try {
-    // --- Opciones del producto disponibles ---
-    const existingProductOptions = (product.options?.length ? product.options.map(o => o.name) : createProductOptions(variants).map(o => o.name));
+    // --- Obtener opciones completas del producto (con valores) ---
+    let productOptions;
+    if (product.options?.length) {
+      // Si el producto ya tiene opciones, transformarlas al formato ProductSetInput
+      productOptions = product.options.map(option => ({
+        name: option.name,
+        values: option.values.map(value => ({ name: value }))
+      }));
+    } else {
+      // Si no tiene opciones, crearlas desde las variantes
+      productOptions = createProductOptions(variants);
+    }
 
-    log(`🎯 ProductOptions existentes en producto: [${existingProductOptions.join(', ')}]`);
+    log(`🎯 ProductOptions completas:`, productOptions);
     
-    // Si no hay opciones definidas, detectar automáticamente basándose en variantes
+    // Verificar si necesita opción Color
     const needsColorOption = variants.some(v => v.color && v.color.trim() !== '');
-    log(`🎨 ¿Necesita opción Color? ${needsColorOption} (algunas variantes tienen color)`);
+    const hasColorOption = productOptions.some(o => o.name === "Color");
+    
+    // Añadir Color si es necesario
+    if (needsColorOption && !hasColorOption) {
+      const uniqueColors = [...new Set(variants.map(v => v.color).filter(Boolean))];
+      if (uniqueColors.length > 0) {
+        productOptions.push({
+          name: "Color",
+          values: uniqueColors.map(color => ({ name: color }))
+        });
+        log(`🎨 Añadida opción 'Color' automáticamente con valores: ${uniqueColors.join(", ")}`);
+      }
+    }
     
     // Preparar variantes para bulk create (excluir la primera que ya existe)
     const variantsInput = variants.slice(1).map(variant => {
@@ -1197,11 +1227,21 @@ async function createProductVariants(admin, product, variants) {
       const optionValues = [];
 
       // 1. Color PRIMERO (SOLO si existe en las opciones del producto O si alguna variante tiene color)
-      const shouldAddColor = existingProductOptions.includes("Color") || needsColorOption;
+      const shouldAddColor = productOptions.some(o => o.name === "Color") || needsColorOption;
       if (shouldAddColor) {
-        const colorValue = variant.color || "Sin especificar";
-        optionValues.push({ optionName: "Color", name: colorValue });
-        log(`✅ Color agregado a variante: ${colorValue} (variant.color: ${variant.color || 'undefined'})`);
+        const colorValue = variant.color;
+        // Solo añadir color si realmente existe, sino usar fallback
+        if (colorValue && colorValue.trim() !== "") {
+          optionValues.push({ optionName: "Color", name: colorValue });
+          log(`✅ Color agregado a variante: ${colorValue} (variant.color: ${variant.color || 'undefined'})`);
+        } else {
+          // Si no hay color definido, buscar el primer color disponible en productOptions
+          const colorOption = productOptions.find(o => o.name === "Color");
+          if (colorOption && colorOption.values.length > 0) {
+            optionValues.push({ optionName: "Color", name: colorOption.values[0].name });
+            log(`🔧 Color fallback aplicado: ${colorOption.values[0].name}`);
+          }
+        }
       } else {
         log(`❌ Color NO agregado - no en productOptions y ninguna variante tiene color`);
       }
@@ -1245,6 +1285,25 @@ async function createProductVariants(admin, product, variants) {
       // Opciones (siempre incluir al menos Capacidad y Condición)
       variantInput.optionValues = optionValues;
 
+      // ✅ VALIDAR que cada optionValue existe en productOptions
+      variantInput.optionValues.forEach((optionValue, ovIndex) => {
+        const productOption = productOptions.find(po => po.name === optionValue.optionName);
+        if (!productOption) {
+          log(`❌ createProductVariants - optionValue ${ovIndex}: La opción "${optionValue.optionName}" no existe en productOptions`);
+          throw new Error(`La opción "${optionValue.optionName}" no existe en productOptions`);
+        }
+
+        const valueExists = productOption.values.some(v => v.name === optionValue.name);
+        if (!valueExists) {
+          log(`❌ createProductVariants - optionValue ${ovIndex}: El valor "${optionValue.name}" no existe en la opción "${optionValue.optionName}"`);
+          log(`📋 Valores disponibles: ${productOption.values.map(v => v.name).join(', ')}`);
+          
+          // Usar el primer valor disponible como fallback
+          optionValue.name = productOption.values[0].name;
+          log(`🔧 Usando fallback: "${optionValue.name}"`);
+        }
+      });
+
       // Imagen con estructura CreateMediaInput
       if (variant.image_link) {
         try {
@@ -1269,6 +1328,8 @@ async function createProductVariants(admin, product, variants) {
     const uniqueVariantsInput = [];
     const seenKeys = new Set();
     
+    log(`🔍 FILTRADO DUPLICADOS - Total variantes antes: ${variantsInput.length}`);
+    
     variantsInput.forEach((variantInput, index) => {
       if (!variantInput) return; // Skip null variants
       
@@ -1277,29 +1338,22 @@ async function createProductVariants(admin, product, variants) {
         .sort()
         .join('|');
         
+      log(`🔑 Variante ${index}: key="${variantKey}"`);
+        
       if (seenKeys.has(variantKey)) {
         log(`🚫 Eliminando variante duplicada ${index}: ${variantKey}`);
-      } else {
-        seenKeys.add(variantKey);
-        uniqueVariantsInput.push(variantInput);
+        return; // Saltar esta variante
       }
+      
+      seenKeys.add(variantKey);
+      uniqueVariantsInput.push(variantInput);
     });
+    
+    log(`✅ FILTRADO DUPLICADOS - Variantes únicas: ${uniqueVariantsInput.length}`);
 
     if (uniqueVariantsInput.length === 0) {
       return { success: true }; // No hay variantes adicionales que crear
     }
-
-    // Validación crítica: verificar que las variantes tengan optionValues para todas las opciones del producto
-    uniqueVariantsInput.forEach((variantInput, index) => {
-      existingProductOptions.forEach(optionName => {
-        const hasValue = variantInput.optionValues.some(ov => ov.optionName === optionName);
-        if (!hasValue) {
-          log(`❌ ERROR CRÍTICO: Variante ${index} no tiene valor para opción "${optionName}"`);
-          log(`   ProductOptions del producto: [${existingProductOptions.join(', ')}]`);
-          log(`   OptionValues de la variante: [${variantInput.optionValues.map(ov => `${ov.optionName}:${ov.name}`).join(', ')}]`);
-        }
-      });
-    });
 
     // --- Paso 1: Crear medios (imágenes) primero ---
     const masterVariant = variants[0]; // Primer elemento como variante principal
@@ -1409,14 +1463,14 @@ async function createProductVariants(admin, product, variants) {
     }));
 
     // --- Paso 3: Preparar el input para productSet usando mediaId ---
-    const productOptions = createProductOptions(variants);
+    const finalProductOptions = createProductOptions(variants);
     const productSetInput = {
       id: product.id,
-      productOptions: productOptions,
+      productOptions: finalProductOptions,
       variants: allVariants.map(variant => {
         // Asegurar que todas las variantes tengan valores para todas las opciones
         const finalOptionValues = normalizeVariantOptionValues(
-          productOptions,
+          finalProductOptions,
           variant.optionValues
         );
         
@@ -1433,7 +1487,7 @@ async function createProductVariants(admin, product, variants) {
 
     // Log crítico antes de productSet
     log(`🔍 PRODUCTSET INPUT - createProductVariants:`);
-    log(`   ProductOptions existentes: ${existingProductOptions.length} opciones - [${existingProductOptions.join(', ')}]`);
+    log(`   ProductOptions: ${finalProductOptions.length} opciones - [${finalProductOptions.map(o => o.name).join(', ')}]`);
     log(`   Total Variants: ${productSetInput.variants.length} variantes`);
     productSetInput.variants.forEach((v, i) => {
       log(`   Variant ${i+1}: ${v.optionValues.length} optionValues - [${v.optionValues.map(ov => `${ov.optionName}=${ov.name}`).join(', ')}]`);
