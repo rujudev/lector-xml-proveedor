@@ -25,6 +25,6 @@ scopes = "write_inventory,write_products"
 
 [auth]
 redirect_urls = [
-  "https://lector-xml-proveedor-71lr.vercel.app//api/auth/callback",
-  "https://lector-xml-proveedor-71lr.vercel.app//api/auth/shopify/callback",
+  "https://lector-xml-proveedor-71lr.vercel.app/api/auth/callback",
+  "https://lector-xml-proveedor-71lr.vercel.app/api/auth/shopify/callback",
 ]
