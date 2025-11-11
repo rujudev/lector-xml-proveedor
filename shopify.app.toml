@@ -1,30 +1,27 @@
 # Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
 
-application_url = "https://lector-xml-proveedor-71lr.vercel.app/"
+application_url = "https://lector-xml-proveedor-71lr.vercel.app"
 client_id = "f5cd656caba7027a223753d2be36fb8e"
 embedded = true
-name = "sync-app"
+name = "SyncApp"
 
 [build]
-automatically_update_urls_on_dev = false
+automatically_update_urls_on_dev = true
 
 [webhooks]
 api_version = "2026-01"
 
 [[webhooks.subscriptions]]
 topics = ["app/uninstalled"]
-uri = "/api/webhooks/app/uninstalled"
+uri = "/webhooks/app/uninstalled"
 
 [[webhooks.subscriptions]]
 topics = ["app/scopes_update"]
-uri = "/api/webhooks/app/scopes_update"
+uri = "/webhooks/app/scopes_update"
 
 [access_scopes]
 # Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
-scopes = "write_inventory,write_products"
+scopes = "write_products,write_inventory"
 
 [auth]
-redirect_urls = [
-  "https://lector-xml-proveedor-71lr.vercel.app/api/auth/callback",
-  "https://lector-xml-proveedor-71lr.vercel.app/api/auth/shopify/callback",
-]
+redirect_urls = ["https://lector-xml-proveedor-71lr.vercel.app/api/auth"]
