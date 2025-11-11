@@ -1220,8 +1220,41 @@ async function createProductVariants(admin, product, variants) {
       }
     }
     
-    // Preparar variantes para bulk create (excluir la primera que ya existe)
-    const variantsInput = variants.slice(1).map(variant => {
+    // 🔧 PRE-FILTRAR DUPLICADOS: Primero eliminar variantes idénticas del XML
+    const uniqueInputVariants = [];
+    const seenInputKeys = new Set();
+    
+    log(`🔍 PRE-FILTRADO - Variantes de entrada: ${variants.slice(1).length}`);
+    
+    variants.slice(1).forEach((variant, index) => {
+      // Crear clave basada en las opciones que se van a generar
+      const testCapacity = normalizeCapacity(variant.title);
+      const testCondition = variant.condition ? 
+        ({"new": "Nuevo", "refurbished": "Reacondicionado", "used": "Usado"}[variant.condition] || variant.condition) : 
+        "Nuevo";
+      const testColor = variant.color || "";
+      
+      const testKey = [
+        `Capacidad:${testCapacity}`,
+        `Condición:${testCondition}`,
+        testColor ? `Color:${testColor}` : ""
+      ].filter(Boolean).sort().join('|');
+      
+      log(`🔑 Input variant ${index+1}: key="${testKey}" (SKU: ${variant.sku})`);
+      
+      if (seenInputKeys.has(testKey)) {
+        log(`🚫 PRE-FILTRO: Eliminando variante de entrada duplicada ${index+1}: ${testKey}`);
+        return;
+      }
+      
+      seenInputKeys.add(testKey);
+      uniqueInputVariants.push(variant);
+    });
+    
+    log(`✅ PRE-FILTRADO - Variantes únicas de entrada: ${uniqueInputVariants.length}`);
+    
+    // Preparar variantes para bulk create (usando variantes ya filtradas)
+    const variantsInput = uniqueInputVariants.map(variant => {
 
       // --- Opciones base: MISMO ORDEN que createProductOptions ---
       const optionValues = [];
@@ -1324,11 +1357,11 @@ async function createProductVariants(admin, product, variants) {
       return variantInput;
     }).filter(Boolean); // Eliminar nulos
 
-    // Filtrar variantes duplicadas por optionValues únicos
+    // Post-filtrar cualquier duplicado restante (por seguridad)
     const uniqueVariantsInput = [];
     const seenKeys = new Set();
     
-    log(`🔍 FILTRADO DUPLICADOS - Total variantes antes: ${variantsInput.length}`);
+    log(`🔍 POST-FILTRADO - Verificando ${variantsInput.length} variantes procesadas`);
     
     variantsInput.forEach((variantInput, index) => {
       if (!variantInput) return; // Skip null variants
@@ -1338,18 +1371,16 @@ async function createProductVariants(admin, product, variants) {
         .sort()
         .join('|');
         
-      log(`🔑 Variante ${index}: key="${variantKey}"`);
-        
       if (seenKeys.has(variantKey)) {
-        log(`🚫 Eliminando variante duplicada ${index}: ${variantKey}`);
-        return; // Saltar esta variante
+        log(`🚫 POST-FILTRO: Eliminando duplicado restante ${index}: ${variantKey}`);
+        return;
       }
       
       seenKeys.add(variantKey);
       uniqueVariantsInput.push(variantInput);
     });
     
-    log(`✅ FILTRADO DUPLICADOS - Variantes únicas: ${uniqueVariantsInput.length}`);
+    log(`✅ POST-FILTRADO - Variantes finales: ${uniqueVariantsInput.length}`);
 
     if (uniqueVariantsInput.length === 0) {
       return { success: true }; // No hay variantes adicionales que crear
