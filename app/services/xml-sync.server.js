@@ -1189,6 +1189,13 @@ function variantExists(product, variant) {
 
 async function createProductVariants(admin, product, variants) {
   try {
+    // 🔍 DEBUG: Log de entrada de createProductVariants
+    log(`🎬 createProductVariants INICIADO - Producto: ${product.title || 'Sin título'}`);
+    log(`📥 VARIANTS RECIBIDAS - Total: ${variants.length}`);
+    variants.forEach((variant, i) => {
+      log(`   📦 Variant ${i}: SKU=${variant.sku}, Color="${variant.color}", Título="${variant.title}"`);
+    });
+    
     // --- Obtener opciones completas del producto (con valores) ---
     let productOptions;
     if (product.options?.length) {
@@ -1204,49 +1211,94 @@ async function createProductVariants(admin, product, variants) {
 
     log(`🎯 ProductOptions completas:`, productOptions);
     
-    // Verificar si necesita opción Color
-    const needsColorOption = variants.some(v => v.color && v.color.trim() !== '');
+    // 🔍 DEBUG: Inspeccionar propiedades reales de las variantes
+    log(`🔬 DEBUG VARIANTS - Total: ${variants.length}`);
+    variants.forEach((variant, i) => {
+      log(`   Variant ${i}:`, {
+        title: variant.title,
+        sku: variant.sku,
+        condition: variant.condition,
+        color: variant.color,
+        colorType: typeof variant.color,
+        hasColor: !!variant.color,
+        colorLength: variant.color ? variant.color.length : 'undefined',
+        colorTrimmed: variant.color ? variant.color.trim() : 'N/A',
+        allProps: Object.keys(variant)
+      });
+    });
+    
+    // Verificar si necesita opción Color - CORRECCIÓN FINAL
+    // Solo crear Color si hay variantes con colores REALES diferentes
+    const validColors = variants.map(v => v.color).filter(c => c && c.trim() !== '');
+    const uniqueValidColors = [...new Set(validColors)];
+    const hasVariantsWithColor = uniqueValidColors.length > 0;
+    const hasVariantsWithoutColor = variants.some(v => !v.color || v.color.trim() === '');
+    
+    // DECISIÓN: Solo crear opción Color si hay colores reales diferentes
+    const needsColorOption = hasVariantsWithColor && uniqueValidColors.length > 1;
     const hasColorOption = productOptions.some(o => o.name === "Color");
     
-    // Añadir Color si es necesario
+    log(`🎨 COLOR DETECTION FINAL:`, {
+      needsColorOption,
+      hasColorOption,
+      hasVariantsWithColor,
+      hasVariantsWithoutColor,
+      validColors: uniqueValidColors,
+      totalVariants: variants.length,
+      reasoning: needsColorOption ? 
+        `Creando opción Color porque hay ${uniqueValidColors.length} colores diferentes` :
+        `NO creando opción Color porque ${!hasVariantsWithColor ? 'no hay colores válidos' : 'solo hay 1 color único'}`
+    });
+    
+    // Añadir Color si es necesario - CORRECCIÓN FINAL
     if (needsColorOption && !hasColorOption) {
-      const uniqueColors = [...new Set(variants.map(v => v.color).filter(Boolean))];
-      if (uniqueColors.length > 0) {
+      const uniqueValidColors = [...new Set(variants.map(v => v.color).filter(c => c && c.trim() !== ''))];
+      
+      // Solo añadir si hay colores reales válidos
+      if (uniqueValidColors.length > 0) {
         productOptions.push({
           name: "Color",
-          values: uniqueColors.map(color => ({ name: color }))
+          values: uniqueValidColors.map(color => ({ name: color }))
         });
-        log(`🎨 Añadida opción 'Color' automáticamente con valores: ${uniqueColors.join(", ")}`);
+        log(`🎨 Añadida opción 'Color' con ${uniqueValidColors.length} colores reales: ${uniqueValidColors.join(", ")}`);
       }
+    } else if (!needsColorOption) {
+      log(`🚫 NO se añade opción Color - no hay suficientes colores diferentes para justificar la opción`);
     }
     
-    // 🔧 PRE-FILTRAR DUPLICADOS: Primero eliminar variantes idénticas del XML
+    // 🔧 PRE-FILTRAR DUPLICADOS: TODAS las variantes (incluida la primera)
     const uniqueInputVariants = [];
     const seenInputKeys = new Set();
     
-    log(`🔍 PRE-FILTRADO - Variantes de entrada: ${variants.slice(1).length}`);
+    log(`🔍 PRE-FILTRADO - Analizando TODAS las ${variants.length} variantes de entrada`);
     
-    variants.slice(1).forEach((variant, index) => {
+    variants.forEach((variant, index) => {
       // Crear clave basada en las opciones que se van a generar
       const testCapacity = normalizeCapacity(variant.title);
       const testCondition = variant.condition ? 
         ({"new": "Nuevo", "refurbished": "Reacondicionado", "used": "Usado"}[variant.condition] || variant.condition) : 
         "Nuevo";
-      const testColor = variant.color || "";
+      
+      // Si no tiene color, usar una clave única basada en el SKU para diferenciarlo
+      let testColor = variant.color || "";
+      if (!testColor || testColor.trim() === "") {
+        // Para pre-filtrado: si no hay color, simplemente usar "Sin Color" 
+        // No inventamos colores aquí, solo agrupamos las variantes sin color
+        testColor = "Sin-Color";
+      }
       
       const testKey = [
         `Capacidad:${testCapacity}`,
         `Condición:${testCondition}`,
-        testColor ? `Color:${testColor}` : ""
-      ].filter(Boolean).sort().join('|');
-      
-      log(`🔑 Input variant ${index+1}: key="${testKey}" (SKU: ${variant.sku})`);
+        `Color:${testColor}`
+      ].sort().join('|');
       
       if (seenInputKeys.has(testKey)) {
-        log(`🚫 PRE-FILTRO: Eliminando variante de entrada duplicada ${index+1}: ${testKey}`);
+        log(`🚫 PRE-FILTRO: Eliminando variante duplicada ${index + 1}: ${testKey} (SKU: ${variant.sku})`);
         return;
       }
       
+      log(`✅ PRE-FILTRO: Variante ${index + 1} es única: ${testKey} (SKU: ${variant.sku})`);
       seenInputKeys.add(testKey);
       uniqueInputVariants.push(variant);
     });
@@ -1254,29 +1306,30 @@ async function createProductVariants(admin, product, variants) {
     log(`✅ PRE-FILTRADO - Variantes únicas de entrada: ${uniqueInputVariants.length}`);
     
     // Preparar variantes para bulk create (usando variantes ya filtradas)
-    const variantsInput = uniqueInputVariants.map(variant => {
+    const variantsInput = uniqueInputVariants.map((variant, variantIndex) => {
+      log(`🔧 Procesando variante ${variantIndex + 1}/${uniqueInputVariants.length}: SKU=${variant.sku}, Título="${variant.title}"`);
 
       // --- Opciones base: MISMO ORDEN que createProductOptions ---
       const optionValues = [];
 
-      // 1. Color PRIMERO (SOLO si existe en las opciones del producto O si alguna variante tiene color)
-      const shouldAddColor = productOptions.some(o => o.name === "Color") || needsColorOption;
+      // 1. Color PRIMERO (SOLO si existe en las opciones del producto)
+      const shouldAddColor = productOptions.some(o => o.name === "Color");
       if (shouldAddColor) {
-        const colorValue = variant.color;
-        // Solo añadir color si realmente existe, sino usar fallback
-        if (colorValue && colorValue.trim() !== "") {
-          optionValues.push({ optionName: "Color", name: colorValue });
-          log(`✅ Color agregado a variante: ${colorValue} (variant.color: ${variant.color || 'undefined'})`);
-        } else {
-          // Si no hay color definido, buscar el primer color disponible en productOptions
-          const colorOption = productOptions.find(o => o.name === "Color");
-          if (colorOption && colorOption.values.length > 0) {
-            optionValues.push({ optionName: "Color", name: colorOption.values[0].name });
-            log(`🔧 Color fallback aplicado: ${colorOption.values[0].name}`);
-          }
+        let colorValue = variant.color;
+        
+        // Si no tiene color pero la opción Color existe, usar el color que corresponda
+        if (!colorValue || colorValue.trim() === "") {
+          // Esta variante no debería estar aquí si no hay opción Color
+          // Pero si está, significa que hay otras variantes con color válido
+          log(`⚠️ Variante ${variant.sku} no tiene color pero el producto requiere opción Color - SALTEANDO`);
+          return null; // Saltar esta variante
         }
+        
+        optionValues.push({ optionName: "Color", name: colorValue });
+        log(`✅ Color agregado a variante ${variant.sku}: "${colorValue}"`);
       } else {
-        log(`❌ Color NO agregado - no en productOptions y ninguna variante tiene color`);
+        // No hay opción Color en el producto, perfecto para variantes sin color
+        log(`✅ No se requiere Color para variante ${variant.sku} (producto sin opción Color)`);
       }
 
       // 2. Capacidad (SIEMPRE incluir, pero posición depende de si hay Color)
@@ -1297,10 +1350,10 @@ async function createProductVariants(admin, product, variants) {
 
       // Crear clave única para detectar duplicados
       const variantKey = optionValues.map(ov => `${ov.optionName}:${ov.name}`).sort().join('|');
-      log(`🔑 Variante key: ${variantKey}`);
+      log(`🔑 Variante ${variantIndex + 1} key: "${variantKey}" (SKU: ${variant.sku})`);
 
       if (variantExists(product, { optionValues })) {
-        log(`⚠️ Variante ya existe: ${optionValues.map(o => o.name).join(" / ")}`);
+        log(`⚠️ Variante ${variantIndex + 1} ya existe en Shopify: ${optionValues.map(o => o.name).join(" / ")} (SKU: ${variant.sku})`);
         return null;
       }
 
@@ -1372,10 +1425,11 @@ async function createProductVariants(admin, product, variants) {
         .join('|');
         
       if (seenKeys.has(variantKey)) {
-        log(`🚫 POST-FILTRO: Eliminando duplicado restante ${index}: ${variantKey}`);
+        log(`🚫 POST-FILTRO: Eliminando duplicado restante ${index + 1}: ${variantKey} (SKU pendiente: ${variantInput._pendingSku})`);
         return;
       }
       
+      log(`✅ POST-FILTRO: Variante ${index + 1} es única: ${variantKey} (SKU pendiente: ${variantInput._pendingSku})`);
       seenKeys.add(variantKey);
       uniqueVariantsInput.push(variantInput);
     });
@@ -1472,26 +1526,62 @@ async function createProductVariants(admin, product, variants) {
     if (masterVariant.image_link && mediaIdMap.has(masterVariant.image_link)) {
       masterVariantInput.mediaId = mediaIdMap.get(masterVariant.image_link);
     }
+
+    // --- Paso 2.5: Filtrar duplicados finales incluyendo masterVariantInput ---
+    // Combinar masterVariantInput con uniqueVariantsInput y eliminar duplicados
+    const allVariantsData = [masterVariantInput, ...uniqueVariantsInput.map(variant => ({
+      price: variant.price,
+      inventoryPolicy: variant.inventoryPolicy,
+      sku: variant._pendingSku ? sanitize(variant._pendingSku.toString()) : undefined,
+      barcode: variant.barcode,
+      optionValues: variant.optionValues,
+      _originalImageUrl: variant._originalImageUrl
+    }))];
+
+    const finalSeenKeys = new Set();
+
+    log(`🔍 FILTRADO FINAL - Verificando ${allVariantsData.length} variantes totales (incluyendo master)`);
     
-    allVariants.push(masterVariantInput);
-    
-    // Agregar variantes adicionales con mediaId
-    allVariants.push(...uniqueVariantsInput.map(variant => {
-      const variantData = {
-        price: variant.price,
-        inventoryPolicy: variant.inventoryPolicy,
-        sku: variant._pendingSku ? sanitize(variant._pendingSku.toString()) : undefined,
-        barcode: variant.barcode,
-        optionValues: variant.optionValues
-      };
-      
-      // Asignar mediaId si existe imagen para esta variante
-      if (variant._originalImageUrl && mediaIdMap.has(variant._originalImageUrl)) {
-        variantData.mediaId = mediaIdMap.get(variant._originalImageUrl);
+    allVariantsData.forEach((variantData, index) => {
+      const variantKey = variantData.optionValues
+        .map(ov => `${ov.optionName}:${ov.name}`)
+        .sort()
+        .join('|');
+        
+      if (finalSeenKeys.has(variantKey)) {
+        log(`🚫 FILTRADO FINAL: Eliminando duplicado ${index + 1}: ${variantKey} (SKU: ${variantData.sku})`);
+        return;
       }
       
-      return variantData;
-    }));
+      log(`✅ FILTRADO FINAL: Variante ${index + 1} es única: ${variantKey} (SKU: ${variantData.sku})`);
+      finalSeenKeys.add(variantKey);
+      
+      // Crear variante final con mediaId si existe
+      const finalVariant = {
+        price: variantData.price,
+        inventoryPolicy: variantData.inventoryPolicy,
+        sku: variantData.sku,
+        barcode: variantData.barcode,
+        optionValues: variantData.optionValues
+      };
+      
+      // Asignar mediaId apropiadamente
+      if (index === 0) {
+        // Es masterVariant - usar su mediaId ya asignado
+        if (masterVariantInput.mediaId) {
+          finalVariant.mediaId = masterVariantInput.mediaId;
+        }
+      } else {
+        // Es variante adicional - usar _originalImageUrl
+        if (variantData._originalImageUrl && mediaIdMap.has(variantData._originalImageUrl)) {
+          finalVariant.mediaId = mediaIdMap.get(variantData._originalImageUrl);
+        }
+      }
+      
+      allVariants.push(finalVariant);
+    });
+    
+    log(`✅ FILTRADO FINAL - Variantes únicas finales: ${allVariants.length}`);
 
     // --- Paso 3: Preparar el input para productSet usando mediaId ---
     const finalProductOptions = createProductOptions(variants);
@@ -1499,18 +1589,36 @@ async function createProductVariants(admin, product, variants) {
       id: product.id,
       productOptions: finalProductOptions,
       variants: allVariants.map(variant => {
-        // Asegurar que todas las variantes tengan valores para todas las opciones
-        const finalOptionValues = normalizeVariantOptionValues(
-          finalProductOptions,
-          variant.optionValues
-        );
+        // Asegurar que cada variante tenga exactamente un valor para cada opción
+        const completeOptionValues = finalProductOptions.map(productOption => {
+          // Buscar si la variante ya tiene un valor para esta opción
+          const existingValue = variant.optionValues.find(ov => ov.optionName === productOption.name);
+          
+          if (existingValue) {
+            return existingValue;
+          }
+          
+          // Si no tiene valor para esta opción, proporcionar valor por defecto
+          if (productOption.name === "Color") {
+            return { optionName: "Color", name: "Sin especificar" };
+          }
+          if (productOption.name === "Capacidad") {
+            return { optionName: "Capacidad", name: "Estándar" };
+          }
+          if (productOption.name === "Condición") {
+            return { optionName: "Condición", name: "Nuevo" };
+          }
+          
+          // Fallback genérico
+          return { optionName: productOption.name, name: "Sin especificar" };
+        });
         
         return {
           price: variant.price,
           inventoryPolicy: variant.inventoryPolicy,
           sku: variant.sku.toString(),
           barcode: variant.barcode,
-          optionValues: finalOptionValues,
+          optionValues: completeOptionValues,
           ...(variant.mediaId ? { mediaId: variant.mediaId } : {})
         };
       })
@@ -1521,8 +1629,57 @@ async function createProductVariants(admin, product, variants) {
     log(`   ProductOptions: ${finalProductOptions.length} opciones - [${finalProductOptions.map(o => o.name).join(', ')}]`);
     log(`   Total Variants: ${productSetInput.variants.length} variantes`);
     productSetInput.variants.forEach((v, i) => {
-      log(`   Variant ${i+1}: ${v.optionValues.length} optionValues - [${v.optionValues.map(ov => `${ov.optionName}=${ov.name}`).join(', ')}]`);
+      log(`   Variant ${i+1}: ${v.optionValues.length} optionValues - [${v.optionValues.map(ov => `${ov.optionName}=${ov.name}`).join(', ')}] (SKU: ${v.sku})`);
     });
+    
+    // NUEVO: Log detallado para detectar duplicados antes del envío
+    log(`🔍 ANÁLISIS DETALLADO PRE-ENVÍO:`);
+    const variantSignatures = productSetInput.variants.map((v, i) => {
+      const signature = v.optionValues.map(ov => ov.name).join(' / ');
+      log(`   Variante ${i+1}: "${signature}" (SKU: ${v.sku})`);
+      return signature;
+    });
+    
+    const duplicateSignatures = variantSignatures.filter((sig, idx) => 
+      variantSignatures.indexOf(sig) !== idx
+    );
+    
+    if (duplicateSignatures.length > 0) {
+      log(`❌ ALERTA: ${duplicateSignatures.length} duplicados detectados después del completado de optionValues:`);
+      duplicateSignatures.forEach(dup => {
+        const indices = variantSignatures
+          .map((sig, idx) => sig === dup ? idx : -1)
+          .filter(idx => idx !== -1);
+        log(`   → "${dup}" aparece en posiciones: ${indices.map(i => i+1).join(', ')}`);
+        
+        // Mostrar detalles de las variantes duplicadas
+        indices.forEach(idx => {
+          const variant = productSetInput.variants[idx];
+          log(`     Posición ${idx+1}: SKU=${variant.sku}, Precio=$${variant.price}`);
+        });
+      });
+      
+      // CRÍTICO: Si hay duplicados después del completado, filtrarlos ahora
+      log(`🚨 FILTRANDO DUPLICADOS DESPUÉS DEL COMPLETADO...`);
+      const seenSignatures = new Set();
+      const uniqueVariants = [];
+      
+      productSetInput.variants.forEach((variant, idx) => {
+        const signature = variant.optionValues.map(ov => ov.name).join(' / ');
+        if (seenSignatures.has(signature)) {
+          log(`   🚫 Eliminando duplicado final: "${signature}" (SKU: ${variant.sku})`);
+          return;
+        }
+        log(`   ✅ Manteniendo: "${signature}" (SKU: ${variant.sku})`);
+        seenSignatures.add(signature);
+        uniqueVariants.push(variant);
+      });
+      
+      productSetInput.variants = uniqueVariants;
+      log(`✅ Filtrado final: ${uniqueVariants.length} variantes únicas después del completado`);
+    } else {
+      log(`✅ No hay duplicados en productSetInput antes del envío`);
+    }
 
     const rawResponse = await withRetry(() =>
       admin.graphql(PRODUCT_SET, {
