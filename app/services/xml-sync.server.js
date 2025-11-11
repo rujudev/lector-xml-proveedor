@@ -428,7 +428,11 @@ function parseXmlProduct(item) {
   if (availabilityInfo.tags) tags.push(...availabilityInfo.tags);
 
   // Marca
-  if (item["g:brand"]) tags.push(item["g:brand"]);
+  if (item["g:brand"]) {
+    const brandTag = item['g:brand'].toLowerCase() === 'apple' ? 'Apple' : 'Android';
+
+    tags.push(brandTag);
+  }
 
   // Condición → etiquetas normalizadas
   const condition = item["g:condition"]?.toLowerCase();
@@ -455,6 +459,9 @@ function parseXmlProduct(item) {
 
   // Categoría
   if (item["g:product_type"]) tags.push(item["g:product_type"]);
+
+  // Sistema operativo
+
 
   // ============================================
   // Producto normalizado
