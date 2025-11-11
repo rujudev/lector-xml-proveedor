@@ -3,11 +3,10 @@
 application_url = "https://example.com"
 client_id = "f5cd656caba7027a223753d2be36fb8e"
 embedded = true
-name = "lector-xml-proveedor"
+name = "SyncApp"
 
 [build]
 automatically_update_urls_on_dev = true
-include_config_on_deploy = true
 
 [webhooks]
 api_version = "2026-01"
