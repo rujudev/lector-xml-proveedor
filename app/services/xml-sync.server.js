@@ -1,3 +1,29 @@
+// === PUBLICACIÓN EN CANALES SHOPIFY ===
+async function getPublicationIds(admin) {
+  const query = `
+    { publications(first: 10) {
+      edges { node { id name channel { handle } } } }
+    }
+  `;
+  const response = await admin.graphql(query);
+  const result = await parseGraphQLResponse(response);
+  const publications = result.data?.publications?.edges || [];
+  return publications
+    .filter(pub => ["online_store", "shop"].includes(pub.node.channel.handle))
+    .map(pub => pub.node.id);
+}
+
+async function publishProduct(admin, productId, channelIds) {
+  const mutation = `
+    mutation publishProduct($id: ID!, $channelIds: [ID!]!) {
+      publishablePublish(id: $id, input: { publicationIds: $channelIds }) {
+        publishable { id }
+        userErrors { field message }
+      }
+    }
+  `;
+  await admin.graphql(mutation, { variables: { id: productId, channelIds } });
+}
 // =============================================================================
 // XML SYNC → SHOPIFY (Versión corregida, estable y legible)
 // =============================================================================
@@ -1040,6 +1066,19 @@ async function createShopifyProductWithVariants(admin, variants) {
 
     log(`✅ Producto base creado: ${createdProduct.title} (ID: ${createdProduct.id})`);
 
+    // === PUBLICAR PRODUCTO EN CANALES ===
+    try {
+      const channelIds = await getPublicationIds(admin);
+      if (channelIds.length) {
+        await publishProduct(admin, createdProduct.id, channelIds);
+        log(`🌐 Producto publicado en canales: ${channelIds.length}`);
+      } else {
+        log(`⚠️ No se encontraron canales de publicación para publicar el producto.`);
+      }
+    } catch (err) {
+      log(`⚠️ Error publicando producto en canales: ${err.message}`);
+    }
+
     // Paso 2: Agregar imágenes al producto
     const imagesResult = await addProductImages(admin, createdProduct.id, variants);
     if (!imagesResult.success) {
@@ -1719,6 +1758,19 @@ async function createShopifyProduct(admin, p) {
     }
 
     log(`✅ Producto base creado: ${createdProduct.title} (ID: ${createdProduct.id})`);
+
+    // === PUBLICAR PRODUCTO EN CANALES ===
+    try {
+      const channelIds = await getPublicationIds(admin);
+      if (channelIds.length) {
+        await publishProduct(admin, createdProduct.id, channelIds);
+        log(`🌐 Producto publicado en canales: ${channelIds.length}`);
+      } else {
+        log(`⚠️ No se encontraron canales de publicación para publicar el producto.`);
+      }
+    } catch (err) {
+      log(`⚠️ Error publicando producto en canales: ${err.message}`);
+    }
 
     // Paso 2: Agregar imágenes al producto
     const imagesResult = await addProductImages(admin, createdProduct.id, [p]);
